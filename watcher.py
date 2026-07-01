@@ -1,4 +1,4 @@
-"""Watchdog 实时监控 — 监听 NFO 文件变化，变化时立即 NFO→DB 回写"""
+"""Watchdog 实时监控 — NFO 变化时立即 NFO→DB，仅处理 cache 中已有记录"""
 import os
 import threading
 import time
@@ -9,12 +9,10 @@ from config import log, WATCHDOG_DEBOUNCE
 from db.connection import connect
 from db import queries
 from nfo.reader import read_nfo
-from sync.strategy import decide
 import state as st
 
 
 class NfoChangeHandler(FileSystemEventHandler):
-    """监听 .nfo 文件的修改和创建事件"""
 
     def __init__(self):
         super().__init__()
@@ -42,7 +40,6 @@ class NfoChangeHandler(FileSystemEventHandler):
             self._pending[os.path.abspath(nfo_path)] = time.time()
 
     def get_ready(self) -> list[str]:
-        """返回已稳定（超过 DEBOUNCE 秒未变化）的 NFO 路径列表"""
         now = time.time()
         ready = []
         with self._lock:
@@ -57,7 +54,6 @@ class NfoChangeHandler(FileSystemEventHandler):
 
 
 class Watcher:
-    """Watchdog 监控器"""
 
     def __init__(self, watch_paths: list[str]):
         self._watch_paths = [p for p in watch_paths if os.path.isdir(p)]
@@ -69,7 +65,6 @@ class Watcher:
         if not self._watch_paths:
             log.warning("无有效监控目录，Watchdog 未启动")
             return
-
         self._observer = Observer()
         for p in self._watch_paths:
             self._observer.schedule(self._handler, p, recursive=True)
@@ -85,17 +80,14 @@ class Watcher:
             log.info("Watchdog 已停止")
 
     def pause(self):
-        """暂停事件处理（周期同步期间调用）"""
         self._paused.set()
         log.debug("Watchdog 已暂停")
 
     def resume(self):
-        """恢复事件处理"""
         self._paused.clear()
         log.debug("Watchdog 已恢复")
 
     def process_events(self):
-        """主线程定期调用，处理已稳定的 NFO 变化"""
         if self._paused.is_set():
             return
         ready = self._handler.get_ready()
@@ -107,38 +99,35 @@ class Watcher:
             self._sync_one(nfo_path)
 
     def _sync_one(self, nfo_path: str):
-        """对单个 NFO 文件执行 NFO→DB 回写"""
+        """NFO 被编辑 → NFO→DB，仅处理 cache 中已有的 category_id"""
         try:
             nfo = read_nfo(nfo_path)
             if nfo is None:
                 log.debug("Watchdog: 解析失败 %s", nfo_path)
                 return
-            if not nfo.ugreen.category_id:
+            cat = nfo.ugreen.category_id
+            if not cat:
                 log.debug("Watchdog: 无 category_id，跳过 %s", nfo_path)
+                return
+
+            cache = st.load()
+            if cat not in cache:
+                log.debug("Watchdog: category_id=%s 不在缓存中，跳过", cat)
                 return
 
             conn = connect()
             try:
-                db_rec = queries.fetch_video_by_category(conn, nfo.ugreen.category_id)
+                db_rec = queries.fetch_video_by_category(conn, cat)
                 if db_rec is None:
-                    log.debug("Watchdog: DB 无此记录 category_id=%s，跳过 %s",
-                              nfo.ugreen.category_id, os.path.basename(nfo_path))
+                    log.debug("Watchdog: DB 无此记录 category_id=%s", cat)
                     return
 
-                decision = decide(nfo, db_rec)
-                if decision.direction == "skip":
-                    log.debug("Watchdog: 无变化，跳过 %s", os.path.basename(nfo_path))
-                    return
-
-                log.info("Watchdog: [%s] %s → NFO→DB: %s",
-                         decision.scene, os.path.basename(nfo_path), decision.message)
-
-                queries.sync_nfo_to_db(conn, nfo)
+                log.info("Watchdog: %s → NFO→DB (用户编辑 NFO)", os.path.basename(nfo_path))
+                queries.sync_nfo_to_db(conn, nfo, sync_utime=True)
                 conn.commit()
 
-                cache = st.load()
-                st.update_cache(nfo.ugreen.category_id,
-                                db_rec.ctime, db_rec.utime, nfo_path, cache)
+                mtime = int(os.path.getmtime(nfo_path))
+                st.update_cache(cat, db_rec.ctime, mtime, nfo_path, cache)
                 st.save(cache)
             except Exception:
                 conn.rollback()

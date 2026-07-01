@@ -89,7 +89,6 @@ def write_nfo_from_db(nfo: NfoRecord, db: DbRecord,
 
     ug.ug_video_info_id = db.ug_video_info_id
     ug.ctime = db.ctime
-    ug.utime = db.utime
 
     write_nfo(nfo)
 
@@ -179,7 +178,6 @@ def _build_ugreen(nfo: NfoRecord, root: ET.Element):
             _sub(a, "channels", str(ug_meta.fileinfo.channels))
 
     _sub(ug, "ctime", str(ug_meta.ctime))
-    _sub(ug, "utime", str(ug_meta.utime))
 
 
 def _sub(parent, tag: str, text: str):

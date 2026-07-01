@@ -158,6 +158,7 @@ Phase 2 ── 扫描 DB，查找无 NFO 的记录
 | `SCAN_INTERVAL` | | `3600` | 扫描间隔（秒），`0` 表示只执行一次后退出 |
 | `SYNC_MODE` | | `bidirectional` | `export`(DB→NFO) / `import`(NFO→DB) / `bidirectional` |
 | `DRY_RUN` | | `false` | 试运行，不实际写入 |
+| `TARGET_PATH` | | 空 | 路径前缀过滤，仅在 `folder_path LIKE '{值}%'` 范围内同步。空或 `/` 表示不限。用于小范围测试 |
 | `LOG_LEVEL` | | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 
 ## 部署

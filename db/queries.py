@@ -27,8 +27,10 @@ def fetch_video_by_category(conn, category_id: str) -> Optional[DbRecord]:
     return DbRecord(**{k: (v if v is not None else _default(k)) for k, v in row.items()})
 
 
-def fetch_all_file_info(conn) -> list[FileRecord]:
-    """查询所有 file_info 数据，JOIN ug_video_info 获取 ctime/utime"""
+def fetch_all_file_info(conn, path_prefix: str = "") -> list[FileRecord]:
+    """查询 file_info 数据，JOIN ug_video_info 获取 ctime/utime。
+    若 path_prefix 非空，仅返回 folder_path LIKE '{path_prefix}%' 的记录。
+    """
     sql = """
         SELECT
             f.file_id, f.file_name, f.file_path, f.folder_path,
@@ -42,11 +44,17 @@ def fetch_all_file_info(conn) -> list[FileRecord]:
             COALESCE(v.utime, 0) AS video_utime
         FROM file_info f
         LEFT JOIN ug_video_info v ON f.category_id = v.category_id
-        ORDER BY f.folder_path
     """
+    params = []
+    if path_prefix:
+        sql += " WHERE f.folder_path LIKE %s"
+        params.append(path_prefix + "%")
+
+    sql += " ORDER BY f.folder_path"
+
     records = []
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql)
+        cur.execute(sql, params)
         for row in cur.fetchall():
             records.append(FileRecord(**{
                 k: (v if v is not None else _default_file(k))
@@ -154,7 +162,7 @@ def upsert_video_info(conn, nfo: NfoRecord) -> int:
         # UPDATE — 只覆写 NFO 中明确声明的字段
         update_fields = {
             k: v for k, v in fields.items()
-            if k in nfo.official_fields_present or k in ("utime",)
+            if k in nfo.official_fields_present
         }
         if not update_fields:
             return existing.ug_video_info_id
@@ -165,11 +173,12 @@ def upsert_video_info(conn, nfo: NfoRecord) -> int:
         log.debug("UPDATE ug_video_info: %s", set_clause)
     else:
         # INSERT
+        import time as _time
         fields.setdefault("category_id", nfo.ugreen.category_id)
         fields.setdefault("use_nfo", nfo.ugreen.use_nfo)
         fields.setdefault("media_lib_set_id", nfo.ugreen.media_lib_set_id)
         fields.setdefault("ctime", nfo.ugreen.ctime or 0)
-        fields.setdefault("utime", nfo.ugreen.utime or 0)
+        fields.setdefault("utime", int(_time.time()))
         columns = ", ".join(fields.keys())
         placeholders = ", ".join(["%s"] * len(fields))
         values = list(fields.values())
@@ -217,14 +226,23 @@ def _build_video_fields(nfo: NfoRecord) -> dict:
     if "all_season_episode_num" in present and o.all_season_episode_num:
         fields["all_season_episode_num"] = o.all_season_episode_num
 
-    fields["utime"] = nfo.ugreen.utime or 0
     return fields
 
 
-def sync_nfo_to_db(conn, nfo: NfoRecord) -> int:
+def sync_nfo_to_db(conn, nfo: NfoRecord, sync_utime: bool = False) -> int:
     """NFO → 数据库 完整回写（视频元数据 + 演员 + 播放记录 + 收藏 + 合集）。
-    供 executor 和 watcher 共用，返回 ug_video_info_id。"""
+    供 executor 和 watcher 共用，返回 ug_video_info_id。
+    sync_utime=True 时将 NFO 文件 mtime 写入 DB.utime（规则 3.1b 手动编辑 NFO）。
+    """
+    import os as _os
     vid = upsert_video_info(conn, nfo)
+    if sync_utime:
+        mtime = int(_os.path.getmtime(nfo.nfo_path))
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE ug_video_info SET utime = %s WHERE category_id = %s",
+                (mtime, nfo.ugreen.category_id),
+            )
     if nfo.official.actors:
         upsert_actors(conn, nfo.ugreen.category_id, nfo.official.actors)
     if nfo.ugreen.play_history:

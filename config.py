@@ -20,6 +20,9 @@ MEDIA_LIB_PATHS = [
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "3600"))
 SYNC_MODE = os.getenv("SYNC_MODE", "bidirectional")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
+TARGET_PATH = (os.getenv("TARGET_PATH", "") or "").strip()
+if TARGET_PATH in ("", "/"):
+    TARGET_PATH = ""  # 空值表示不限路径
 
 # ---- Watchdog ----
 WATCHDOG_ENABLED = os.getenv("WATCHDOG_ENABLED", "true").lower() in ("1", "true", "yes")

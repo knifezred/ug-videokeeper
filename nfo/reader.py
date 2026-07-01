@@ -132,7 +132,6 @@ def _parse_ugreen(root: ET.Element, meta: UgreenMeta):
     meta.use_nfo = _int_text(ug, "use_nfo") or 1
     meta.media_lib_set_id = _int_text(ug, "media_lib_set_id") or 0
     meta.ctime = _int_text(ug, "ctime") or 0
-    meta.utime = _int_text(ug, "utime") or 0
 
     col_el = ug.find("collection")
     if col_el is not None:
