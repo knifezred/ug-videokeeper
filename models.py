@@ -72,6 +72,7 @@ class UgreenMeta:
     collection: Optional[Collection] = None
     play_history: list[PlayHistory] = field(default_factory=list)
     favorites: list[Favorite] = field(default_factory=list)
+    genre: list[str] = field(default_factory=list)
     fileinfo: Optional[FileInfo] = None
     ctime: int = 0
     utime: int = 0

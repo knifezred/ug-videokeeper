@@ -37,7 +37,10 @@ class NfoChangeHandler(FileSystemEventHandler):
 
     def _mark_pending(self, nfo_path: str):
         with self._lock:
-            self._pending[os.path.abspath(nfo_path)] = time.time()
+            abspath = os.path.abspath(nfo_path)
+            if abspath not in self._pending:
+                log.debug("Watchdog 检测到 NFO 变化: %s", abspath)
+            self._pending[abspath] = time.time()
 
     def get_ready(self) -> list[str]:
         now = time.time()
@@ -103,34 +106,37 @@ class Watcher:
         try:
             nfo = read_nfo(nfo_path)
             if nfo is None:
-                log.debug("Watchdog: 解析失败 %s", nfo_path)
+                log.warning("Watchdog: 解析失败 %s", nfo_path)
                 return
             cat = nfo.ugreen.category_id
             if not cat:
-                log.debug("Watchdog: 无 category_id，跳过 %s", nfo_path)
+                log.warning("Watchdog: 无 category_id，跳过 %s", nfo_path)
                 return
 
             cache = st.load()
             if cat not in cache:
-                log.debug("Watchdog: category_id=%s 不在缓存中，跳过", cat)
+                log.info("Watchdog: category_id=%s 不在缓存中，跳过 (需先运行一次定时同步建立缓存)", cat)
                 return
 
             conn = connect()
             try:
                 db_rec = queries.fetch_video_by_category(conn, cat)
                 if db_rec is None:
-                    log.debug("Watchdog: DB 无此记录 category_id=%s", cat)
+                    log.warning("Watchdog: DB 无此记录 category_id=%s", cat)
                     return
 
-                log.info("Watchdog: %s → NFO→DB (用户编辑 NFO)", os.path.basename(nfo_path))
+                log.info("Watchdog: NFO→DB %s cat=%s name=%s",
+                         os.path.basename(nfo_path), cat, db_rec.name)
                 queries.sync_nfo_to_db(conn, nfo, sync_utime=True)
                 conn.commit()
 
-                mtime = int(os.path.getmtime(nfo_path))
-                st.update_cache(cat, db_rec.ctime, mtime, nfo_path, cache)
+                new_utime = int(os.path.getmtime(nfo_path))
+                st.update_cache(cat, db_rec.ctime, new_utime, cache)
                 st.save(cache)
+                log.info("Watchdog: 完成 %s (cache utime=%d)", os.path.basename(nfo_path), new_utime)
             except Exception:
                 conn.rollback()
+                log.error("Watchdog: DB 操作失败 %s", nfo_path, exc_info=True)
                 raise
             finally:
                 conn.close()

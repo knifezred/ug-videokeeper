@@ -1,13 +1,19 @@
 """定时调度 + Watchdog 实时监控"""
-import time
+import signal
+import threading
 import schedule
 from config import SCAN_INTERVAL, WATCHDOG_ENABLED, MEDIA_LIB_PATHS, log
 from sync.executor import run_sync
 from watcher import Watcher
 
+_shutdown = threading.Event()
+
 
 def run():
     log.info("ug-videokeeper 启动，扫描间隔: %s 秒", SCAN_INTERVAL)
+
+    signal.signal(signal.SIGINT, lambda *_: _shutdown.set())
+    signal.signal(signal.SIGTERM, lambda *_: _shutdown.set())
 
     watcher = None
     if WATCHDOG_ENABLED:
@@ -32,12 +38,13 @@ def run():
 
 
 def _loop(watcher: Watcher | None):
-    """主循环"""
-    while True:
+    """主循环（wait 代替 sleep，收到退出信号立即响应）"""
+    while not _shutdown.is_set():
         schedule.run_pending()
         if watcher:
             watcher.process_events()
-        time.sleep(1)
+        _shutdown.wait(1.0)
+    log.info("收到退出信号，关闭中...")
 
 
 def _do_sync(watcher: Watcher | None):
@@ -47,7 +54,7 @@ def _do_sync(watcher: Watcher | None):
     try:
         run_sync()
     except Exception as e:
-        log.error("同步失败: %s", e)
+        log.error("同步失败: %s", e, exc_info=True)
     finally:
         if watcher:
             watcher.resume()

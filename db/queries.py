@@ -35,7 +35,7 @@ def fetch_all_file_info(conn, path_prefix: str = "") -> list[FileRecord]:
         SELECT
             f.file_id, f.file_name, f.file_path, f.folder_path,
             f.file_size, f.duration, f.season_num, f.episode_num,
-            f.clarity, f.category_id, f.media_lib_set_id, f.use_nfo,
+            f.clarity, f.category_id::text AS category_id, f.media_lib_set_id, f.use_nfo,
             COALESCE(v.ug_video_info_id, 0) AS ug_video_info_id,
             COALESCE(v.name, '') AS video_name,
             COALESCE(v.type, 0) AS video_type,
@@ -159,10 +159,10 @@ def upsert_video_info(conn, nfo: NfoRecord) -> int:
     existing = fetch_video_by_category(conn, nfo.ugreen.category_id)
 
     if existing:
-        # UPDATE — 只覆写 NFO 中明确声明的字段
+        # UPDATE — 覆写 NFO 中声明的字段 + ugreen 衍生字段
         update_fields = {
             k: v for k, v in fields.items()
-            if k in nfo.official_fields_present
+            if k in nfo.official_fields_present or k == "style_list"
         }
         if not update_fields:
             return existing.ug_video_info_id
@@ -189,9 +189,10 @@ def upsert_video_info(conn, nfo: NfoRecord) -> int:
         cur.execute(sql, values)
         if not existing:
             new_id = cur.fetchone()[0]
-            # 更新 NFO 的 ug_video_info_id
             nfo.ugreen.ug_video_info_id = new_id
+            log.debug("INSERT ug_video_info: cat=%s new_id=%d", nfo.ugreen.category_id, new_id)
             return new_id
+        log.debug("UPDATE ug_video_info: cat=%s id=%d", nfo.ugreen.category_id, existing.ug_video_info_id)
         return existing.ug_video_info_id
 
 
@@ -215,10 +216,9 @@ def _build_video_fields(nfo: NfoRecord) -> dict:
         fields["douban_id"] = o.doubanid
     if "mpaa" in present and o.mpaa:
         fields["grading"] = _parse_mpaa(o.mpaa)
-    if "country" in present and o.country:
-        fields["country_list"] = o.country
-    if "genre" in present and o.genre:
-        fields["style_list"] = o.genre
+    genre = _to_style_list(nfo)
+    if genre:
+        fields["style_list"] = genre
     if "season" in present or "seasonnumber" in present:
         fields["season"] = o.seasonnumber or o.season
     if "releasedate" in present and o.releasedate:
@@ -243,14 +243,29 @@ def sync_nfo_to_db(conn, nfo: NfoRecord, sync_utime: bool = False) -> int:
                 "UPDATE ug_video_info SET utime = %s WHERE category_id = %s",
                 (mtime, nfo.ugreen.category_id),
             )
-    if nfo.official.actors:
-        upsert_actors(conn, nfo.ugreen.category_id, nfo.official.actors)
+        log.debug("sync_utime: cat=%s utime=%d", nfo.ugreen.category_id, mtime)
     if nfo.ugreen.play_history:
-        upsert_play_history(conn, nfo.ugreen.category_id, vid,
+        log.debug("sync_nfo_to_db: 写入 %d 条播放记录 cat=%s",
+                  len(nfo.ugreen.play_history), nfo.ugreen.category_id)
+        file_id = _fetch_file_id(conn, nfo.ugreen.category_id)
+        upsert_play_history(conn, nfo.ugreen.category_id, vid, file_id,
                             nfo.ugreen.play_history)
+        # 同步更新 ug_video_info.last_play_file_path（绿联筛选"已观看"依赖此字段）
+        file_path = _fetch_file_path(conn, file_id)
+        if file_path:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE ug_video_info SET last_play_file_path = %s WHERE category_id = %s",
+                    (file_path, nfo.ugreen.category_id),
+                )
+            log.debug("sync_nfo_to_db: 更新 last_play_file_path=%s", file_path)
     if nfo.ugreen.favorites:
+        log.debug("sync_nfo_to_db: 写入 %d 条收藏 cat=%s",
+                  len(nfo.ugreen.favorites), nfo.ugreen.category_id)
         upsert_favorites(conn, nfo.ugreen.category_id, nfo.ugreen.favorites)
     if nfo.ugreen.collection and nfo.ugreen.collection.name:
+        log.debug("sync_nfo_to_db: 写入合集 %s cat=%s",
+                  nfo.ugreen.collection.name, nfo.ugreen.category_id)
         upsert_collection_for_video(
             conn, nfo.ugreen.category_id,
             nfo.ugreen.collection.name,
@@ -259,22 +274,21 @@ def sync_nfo_to_db(conn, nfo: NfoRecord, sync_utime: bool = False) -> int:
     return vid
 
 
-def upsert_actors(conn, category_id: str, actors: list[Actor]):
+def upsert_actors(conn, category_id: str, actors: list[Actor],
+                  media_lib_set_id: int = 0):
     """删除旧演员关联，写入新的"""
-    # 删除旧关联
     with conn.cursor() as cur:
         cur.execute(
             "DELETE FROM ug_video_actor_relation WHERE category_id = %s",
-            (category_id,)
+            (category_id,),
         )
     if not actors:
+        log.debug("upsert_actors: 无演员, cat=%s", category_id)
         return
 
-    # 为每个 actor 确保 ug_actor 存在，拉取 actor_once_id
-    values = []
-    for seq, a in enumerate(actors):
-        once_id = _ensure_actor(conn, a)
-        values.append((category_id, a.role or "", once_id, seq))
+    once_ids = _ensure_actors_batch(conn, actors)
+    values = [(category_id, a.role or "", oid, seq, media_lib_set_id)
+              for seq, (a, oid) in enumerate(zip(actors, once_ids))]
 
     with conn.cursor() as cur:
         psycopg2.extras.execute_values(
@@ -284,98 +298,163 @@ def upsert_actors(conn, category_id: str, actors: list[Actor]):
                VALUES %s""",
             values,
         )
+    log.debug("upsert_actors: 写入 %d 个演员关联 cat=%s", len(values), category_id)
 
 
-def _ensure_actor(conn, actor: Actor) -> str:
-    """查找或创建 ug_actor，返回 actor_once_id"""
-    # 尝试按 tmdb_id 查找
-    if actor.tmdbid:
+def _ensure_actors_batch(conn, actors: list[Actor]) -> list[str]:
+    """批量查找或创建 ug_actor，返回 actor_once_id 列表（顺序与输入一致）"""
+    if not actors:
+        return []
+
+    tmdb_ids = [a.tmdbid for a in actors if a.tmdbid]
+    names = [a.name for a in actors]
+
+    tmdb_map: dict[int, str] = {}
+    if tmdb_ids:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT actor_once_id FROM ug_actor WHERE tmdb_id = %s LIMIT 1",
-                (actor.tmdbid,)
+                "SELECT tmdb_id, actor_once_id FROM ug_actor WHERE tmdb_id = ANY(%s)",
+                (tmdb_ids,),
             )
-            row = cur.fetchone()
-            if row:
-                return row[0]
+            for row in cur.fetchall():
+                tmdb_map[row[0]] = row[1]
 
-    # 按名字查找
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT actor_once_id FROM ug_actor WHERE name = %s LIMIT 1",
-            (actor.name,)
-        )
-        row = cur.fetchone()
-        if row:
-            return row[0]
+    name_map: dict[str, str] = {}
+    if names:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT name, actor_once_id FROM ug_actor WHERE name = ANY(%s)",
+                (names,),
+            )
+            for row in cur.fetchall():
+                name_map[row[0]] = row[1]
 
-    # 都不存在则创建
-    import uuid
-    once_id = f"ug_actor_{uuid.uuid4().hex[:8]}"
-    with conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO ug_actor (actor_id, actor_once_id, name, tmdb_id, actor_data_source)
-               VALUES (%s, %s, %s, %s, %s)""",
-            (0, once_id, actor.name, actor.tmdbid or 0, 2),  # data_source=2 手动
-        )
-    return once_id
+    results: list[str] = []
+    to_insert: list[tuple] = []
+
+    import uuid as _uuid
+    for a in actors:
+        if a.tmdbid and a.tmdbid in tmdb_map:
+            results.append(tmdb_map[a.tmdbid])
+        elif a.name in name_map:
+            results.append(name_map[a.name])
+        else:
+            once_id = f"ug_actor_{_uuid.uuid4().hex[:8]}"
+            results.append(once_id)
+            to_insert.append((0, once_id, a.name, a.tmdbid or 0, 2))
+
+    if to_insert:
+        log.debug("_ensure_actors_batch: 创建 %d 个新演员", len(to_insert))
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO ug_actor (actor_id, actor_once_id, name, tmdb_id, actor_data_source)
+                   VALUES %s""",
+                to_insert,
+            )
+
+    return results
 
 
 def upsert_play_history(conn, category_id: str, ug_video_info_id: int,
-                        items: list[PlayHistory]):
-    """按 uid + category_id 匹配，更新或插入播放记录"""
-    for ph in items:
+                        file_id: int, items: list[PlayHistory]):
+    """按 uid + category_id 匹配，批量更新或插入播放记录"""
+    if not items:
+        log.debug("upsert_play_history: 无数据 cat=%s", category_id)
+        return
+    uids = [ph.uid for ph in items]
+    log.debug("upsert_play_history: cat=%s vid=%d fid=%d uids=%s",
+              category_id, ug_video_info_id, file_id, uids)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT uid FROM play_history WHERE category_id = %s AND uid = ANY(%s)",
+            (category_id, uids),
+        )
+        existing = {row[0] for row in cur.fetchall()}
+
+    updates = [ph for ph in items if ph.uid in existing]
+    inserts = [ph for ph in items if ph.uid not in existing]
+
+    log.debug("upsert_play_history: 现有=%s 更新=%d 插入=%d",
+              existing, len(updates), len(inserts))
+
+    if updates:
+        log.debug("upsert_play_history UPDATE: %s", [
+            {"uid": ph.uid, "prog": ph.progress, "cpt": ph.current_play_time,
+             "ws": ph.watch_status} for ph in updates
+        ])
         with conn.cursor() as cur:
-            cur.execute(
-                """SELECT play_history_id FROM play_history
-                   WHERE category_id = %s AND uid = %s""",
-                (category_id, ph.uid)
+            cur.executemany(
+                """UPDATE play_history
+                   SET ug_video_info_id = %(vid)s, file_id = %(fid)s,
+                       progress = %(prog)s,
+                       current_play_time = %(cpt)s, last_access_time = %(lat)s,
+                       watch_status = %(ws)s
+                   WHERE category_id = %(cat)s AND uid = %(uid)s""",
+                [{"vid": ug_video_info_id, "fid": file_id,
+                  "prog": ph.progress,
+                  "cpt": ph.current_play_time, "lat": ph.last_access_time,
+                  "ws": ph.watch_status, "cat": category_id, "uid": ph.uid}
+                 for ph in updates],
             )
-            existing = cur.fetchone()
-            if existing:
-                cur.execute(
-                    """UPDATE play_history
-                       SET ug_video_info_id = %s, progress = %s,
-                           current_play_time = %s, last_access_time = %s,
-                           watch_status = %s
-                       WHERE category_id = %s AND uid = %s""",
-                    (ug_video_info_id, ph.progress, ph.current_play_time,
-                     ph.last_access_time, ph.watch_status,
-                     category_id, ph.uid)
-                )
-            else:
-                cur.execute(
-                    """INSERT INTO play_history
-                       (uid, category_id, ug_video_info_id, progress,
-                        current_play_time, last_access_time, watch_status)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                    (ph.uid, category_id, ug_video_info_id, ph.progress,
-                     ph.current_play_time, ph.last_access_time, ph.watch_status)
-                )
+
+    if inserts:
+        log.debug("upsert_play_history INSERT: %s", [
+            {"uid": ph.uid, "prog": ph.progress, "cpt": ph.current_play_time,
+             "ws": ph.watch_status} for ph in inserts
+        ])
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO play_history
+                   (uid, category_id, ug_video_info_id, file_id, progress,
+                    current_play_time, last_access_time, watch_status)
+                   VALUES %s""",
+                [(ph.uid, category_id, ug_video_info_id, file_id, ph.progress,
+                  ph.current_play_time, ph.last_access_time, ph.watch_status)
+                 for ph in inserts],
+            )
 
 
 def upsert_favorites(conn, category_id: str, items: list[Favorite]):
-    """按 uid + once_id(=category_id) 匹配"""
-    for fav in items:
+    """按 uid + once_id 批量匹配"""
+    if not items:
+        return
+    uids = [fav.uid for fav in items]
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT uid FROM favorites WHERE once_id = %s AND uid = ANY(%s)",
+            (category_id, uids),
+        )
+        existing = {row[0] for row in cur.fetchall()}
+
+    updates = [fav for fav in items if fav.uid in existing]
+    inserts = [fav for fav in items if fav.uid not in existing]
+
+    log.debug("upsert_favorites: cat=%s updates=%d inserts=%d",
+              category_id, len(updates), len(inserts))
+
+    if updates:
         with conn.cursor() as cur:
-            cur.execute(
-                """SELECT favorites_id FROM favorites
-                   WHERE once_id = %s AND uid = %s""",
-                (category_id, fav.uid)
+            cur.executemany(
+                """UPDATE favorites SET favorites_type = %(ft)s, create_time = %(ct)s
+                   WHERE once_id = %(once)s AND uid = %(uid)s""",
+                [{"ft": fav.favorites_type, "ct": fav.create_time,
+                  "once": category_id, "uid": fav.uid}
+                 for fav in updates],
             )
-            existing = cur.fetchone()
-            if existing:
-                cur.execute(
-                    """UPDATE favorites SET favorites_type = %s, create_time = %s
-                       WHERE once_id = %s AND uid = %s""",
-                    (fav.favorites_type, fav.create_time, category_id, fav.uid)
-                )
-            else:
-                cur.execute(
-                    """INSERT INTO favorites (uid, once_id, favorites_type, create_time)
-                       VALUES (%s, %s, %s, %s)""",
-                    (fav.uid, category_id, fav.favorites_type, fav.create_time)
-                )
+
+    if inserts:
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO favorites (uid, once_id, favorites_type, create_time)
+                   VALUES %s""",
+                [(fav.uid, category_id, fav.favorites_type, fav.create_time)
+                 for fav in inserts],
+            )
 
 
 def upsert_collection_for_video(conn, category_id: str, collection_name: str,
@@ -417,11 +496,50 @@ def _find_or_create_collection(conn, name: str, tmdbid: int = 0) -> Optional[str
 
 # ---- helpers ----
 
+def _fetch_file_id(conn, category_id: str) -> int:
+    """查询 DB 中当前 category_id 对应的 file_id"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT file_id FROM file_info WHERE category_id = %s LIMIT 1",
+            (category_id,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else 0
+
+
+def _fetch_file_path(conn, file_id: int) -> str:
+    """查询 file_id 对应的完整文件路径"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT file_path FROM file_info WHERE file_id = %s", (file_id,))
+        row = cur.fetchone()
+        return row[0] if row else ""
+
+
+def _to_style_list(nfo: NfoRecord) -> list[int]:
+    """将 ugreen genre 转为 int 列表（适配 integer[] 列），回退到 official genre"""
+    ug_genre = nfo.ugreen.genre
+    if ug_genre:
+        return [int(g) for g in ug_genre if g.isdigit()]
+    if "genre" in nfo.official_fields_present and nfo.official.genre:
+        return [int(g) for g in nfo.official.genre if g.isdigit()]
+    return []
+
+
+# 字段 → 空值默认映射（仅 fetch_video_by_category 返回的列）
+_DB_DEFAULTS: dict[str, int | str | float | list] = {
+    "ug_video_info_id": 0, "category_id": "", "name": "",
+    "douban_id": 0, "tmdb_id": 0,
+    "score": 0.0, "year": 0, "season": 0,
+    "introduction": "", "country_list": [], "style_list": [],
+    "grading": 0, "release_date": 0,
+    "all_season_episode_num": 0,
+    "collection_id": "", "ctime": 0, "utime": 0,
+}
+
+
 def _default(key: str):
-    """RealDictCursor 返回的 None 值的默认值"""
-    return {
-        "country_list": [], "style_list": [],
-    }.get(key, 0 if "time" in key or "id" in key or "num" in key else "")
+    """RealDictCursor 返回的 None 值的默认值（显式映射，无启发式陷阱）"""
+    return _DB_DEFAULTS.get(key, "")
 
 
 def _default_file(key: str):

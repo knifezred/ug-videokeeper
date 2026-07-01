@@ -1,5 +1,6 @@
 """同步策略 — 两种决策路径：cache 不存在 + cache 存在"""
 from models import NfoRecord, SyncResult
+from config import log
 
 
 def decide_first_sync(nfo: NfoRecord | None, db_ctime: int) -> SyncResult:
@@ -18,12 +19,15 @@ def decide_first_sync(nfo: NfoRecord | None, db_ctime: int) -> SyncResult:
         result.direction = "db_to_nfo"
         result.scene = "1"
         result.message = "本地无 NFO，从数据库创建"
+        log.debug("策略决策 scene=1: 无 NFO, DB ctime=%d → DB→NFO", db_ctime)
         return result
 
     if not nfo.has_ugreen:
         result.direction = "db_to_nfo"
         result.scene = "2"
         result.message = "NFO 无 <ugreen>，从数据库覆盖"
+        log.debug("策略决策 scene=2: %s 无 <ugreen>, DB ctime=%d → DB→NFO",
+                  nfo.nfo_path, db_ctime)
         return result
 
     if nfo.ugreen.ctime < db_ctime:
@@ -33,11 +37,15 @@ def decide_first_sync(nfo: NfoRecord | None, db_ctime: int) -> SyncResult:
             f"NFO ctime({nfo.ugreen.ctime}) < DB ctime({db_ctime})，"
             f"从 NFO 回写数据库"
         )
+        log.debug("策略决策 scene=3: %s NFO.ctime=%d < DB.ctime=%d → NFO→DB",
+                  nfo.nfo_path, nfo.ugreen.ctime, db_ctime)
         return result
 
     result.direction = "db_to_nfo"
     result.scene = "4"
     result.message = "首次同步，从数据库建立 NFO 基线"
+    log.debug("策略决策 scene=4: %s NFO.ctime=%d >= DB.ctime=%d → DB→NFO",
+              nfo.nfo_path, nfo.ugreen.ctime if nfo else 0, db_ctime)
     return result
 
 
@@ -60,6 +68,8 @@ def decide_from_cache(db_ctime: int, db_utime: int,
             f"DB 被重新刮削 (db_ctime={db_ctime} > cache_ctime={cache_ctime})，"
             f"从 NFO 回写数据库"
         )
+        log.debug("策略决策 cache.1: db_ctime=%d > cache_ctime=%d → NFO→DB",
+                  db_ctime, cache_ctime)
         return result
 
     if db_ctime == cache_ctime and db_utime > cache_utime:
@@ -69,9 +79,12 @@ def decide_from_cache(db_ctime: int, db_utime: int,
             f"用户编辑了数据 (db_utime={db_utime} > cache_utime={cache_utime})，"
             f"覆盖 NFO"
         )
+        log.debug("策略决策 cache.2: db_utime=%d > cache_utime=%d → DB→NFO",
+                  db_utime, cache_utime)
         return result
 
     result.direction = "skip"
     result.scene = "cache.3"
     result.message = "DB ctime/utime 与缓存一致，跳过"
+    log.debug("策略决策 cache.3: ctime/utime 一致 → skip")
     return result

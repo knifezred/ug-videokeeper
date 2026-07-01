@@ -1,6 +1,7 @@
 """NFO 文件读取 — 解析 XML 为 NfoRecord"""
 import glob
 import os
+import re
 import xml.etree.ElementTree as ET
 from typing import Optional
 from config import log
@@ -28,10 +29,9 @@ def read_nfo(nfo_path: str) -> Optional[NfoRecord]:
     _parse_official(root, official, present)
     _parse_ugreen(root, ugreen)
 
-    if root.tag == "episodedetails":
-        nfo_type = "episode"
-    elif root.tag == "season":
-        nfo_type = "season"
+    log.debug("读取 NFO: %s type=%s title=%s has_ugreen=%s cat=%s fields=%d",
+              nfo_path, nfo_type, official.title, has_ugreen,
+              ugreen.category_id, len(present))
 
     return NfoRecord(
         nfo_type=nfo_type,
@@ -62,8 +62,8 @@ def find_nfo_in_dir(dir_path: str) -> Optional[str]:
 def _detect_type(tag: str) -> str:
     mapping = {"movie": "movie", "tvshow": "tvshow", "season": "season",
                "episodedetails": "episode"}
-    clean = tag.split("}")[-1] if "}" in tag else tag
-    return mapping.get(clean.lower().replace("{http", ""), "movie")
+    clean = re.sub(r"\{[^}]*\}", "", tag)
+    return mapping.get(clean.lower(), "movie")
 
 
 def _text(el, tag: str) -> Optional[str]:
@@ -132,6 +132,11 @@ def _parse_ugreen(root: ET.Element, meta: UgreenMeta):
     meta.use_nfo = _int_text(ug, "use_nfo") or 1
     meta.media_lib_set_id = _int_text(ug, "media_lib_set_id") or 0
     meta.ctime = _int_text(ug, "ctime") or 0
+    meta.utime = _int_text(ug, "utime") or 0
+
+    genres = [g.text.strip() for g in ug.findall("genre") if g.text]
+    if genres:
+        meta.genre = genres
 
     col_el = ug.find("collection")
     if col_el is not None:
@@ -142,20 +147,31 @@ def _parse_ugreen(root: ET.Element, meta: UgreenMeta):
         )
 
     for ph_el in ug.findall("play_history"):
+        uid = _int_text(ph_el, "uid") or 0
+        prog = _float_text(ph_el, "progress") or 0.0
+        cpt = _int_text(ph_el, "current_play_time") or 0
+        lat = _int_text(ph_el, "last_access_time") or 0
+        ws = _int_text(ph_el, "watch_status") or 1
+        log.debug("解析 play_history: uid=%d progress=%.1f play_time=%d last=%d status=%d",
+                  uid, prog, cpt, lat, ws)
         meta.play_history.append(PlayHistory(
-            uid=_int_text(ph_el, "uid") or 0,
-            progress=_float_text(ph_el, "progress") or 0.0,
-            current_play_time=_int_text(ph_el, "current_play_time") or 0,
-            last_access_time=_int_text(ph_el, "last_access_time") or 0,
-            watch_status=_int_text(ph_el, "watch_status") or 1,
+            uid=uid, progress=prog, current_play_time=cpt,
+            last_access_time=lat, watch_status=ws,
         ))
 
     for fav_el in ug.findall("favorites"):
+        uid = _int_text(fav_el, "uid") or 0
+        ct = _int_text(fav_el, "create_time") or 0
+        ft = _int_text(fav_el, "favorites_type") or 1
+        log.debug("解析 favorites: uid=%d create_time=%d type=%d", uid, ct, ft)
         meta.favorites.append(Favorite(
-            uid=_int_text(fav_el, "uid") or 0,
-            create_time=_int_text(fav_el, "create_time") or 0,
-            favorites_type=_int_text(fav_el, "favorites_type") or 1,
+            uid=uid, create_time=ct, favorites_type=ft,
         ))
+
+    if meta.play_history or meta.favorites or meta.genre or meta.collection:
+        log.debug("读取 ugreen: play=%d fav=%d genre=%d col=%s",
+                  len(meta.play_history), len(meta.favorites),
+                  len(meta.genre), meta.collection.name if meta.collection else "无")
 
     fi_el = ug.find("fileinfo")
     if fi_el is not None:
