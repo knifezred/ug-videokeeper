@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tvshow>
+  <title>怪奇物语</title>
+  <year>2016</year>
+  <releasedate>2016-07-15</releasedate>
+  <rating>9.1</rating>
+  <plot>1980年代的霍金斯小镇上，小男孩威尔神秘失踪，他的朋友们发现了一个与秘密政府实验有关的超自然力量。一个拥有超能力的女孩"十一"逃出实验室，与孩子们一起对抗来自平行世界"颠倒世界"的怪物。</plot>
+  <tmdbid>66732</tmdbid>
+  <doubanid>27152242</doubanid>
+  <country>840</country>
+  <genre>18</genre>
+  <genre>9648</genre>
+  <genre>10765</genre>
+  <mpaa>TV-14</mpaa>
+  <season>4</season>
+  <all_season_episode_num>34</all_season_episode_num>
+  <actor>
+    <name>米莉·波比·布朗</name>
+    <role>十一</role>
+    <tmdbid>1356210</tmdbid>
+  </actor>
+  <actor>
+    <name>菲恩·伍法德</name>
+    <role>迈克·威勒</role>
+    <tmdbid>1442069</tmdbid>
+  </actor>
+  <actor>
+    <name>薇诺娜·瑞德</name>
+    <role>乔伊斯·拜尔斯</role>
+    <tmdbid>1920</tmdbid>
+  </actor>
+  <ugreen>
+    <ug_video_info_id>40895</ug_video_info_id>
+    <category_id>ug_video_b92f70a1</category_id>
+    <use_nfo>1</use_nfo>
+    <media_lib_set_id>2</media_lib_set_id>
+    <collection>
+      <name>怪奇物语 全系列</name>
+      <tmdbid>12346</tmdbid>
+    </collection>
+    <play_history>
+      <uid>1</uid>
+      <progress>1.0</progress>
+      <current_play_time>0</current_play_time>
+      <last_access_time>1719300000</last_access_time>
+      <watch_status>2</watch_status>
+    </play_history>
+    <favorites>
+      <uid>1</uid>
+      <create_time>1715000000</create_time>
+      <favorites_type>1</favorites_type>
+    </favorites>
+    <ctime>1715000000</ctime>
+    <utime>1719300000</utime>
+  </ugreen>
+</tvshow>
