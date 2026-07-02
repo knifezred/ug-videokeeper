@@ -16,7 +16,7 @@ def fetch_video_by_category(conn, category_id: str) -> Optional[DbRecord]:
                score, year, season, introduction,
                country_list, style_list, grading,
                release_date, all_season_episode_num,
-               collection_id, ctime, utime
+               collection_id, media_lib_set_id, ctime, utime
         FROM ug_video_info
         WHERE category_id = %s
     """
@@ -396,9 +396,8 @@ def upsert_play_history(conn, items: list[PlayHistory],
         if row:
             matched.append((ph, row["file_id"], row["category_id"], row["vid"]))
         else:
-            log.warning("upsert_play_history: ph uid=%s hash=%s file=%s → 未匹配",
-                        ph.uid, ph.hash_fingerprint[:8] if ph.hash_fingerprint else "",
-                        ph.file_name)
+            log.warning("upsert_play_history: ph uid=%s hash=%s → 未匹配",
+                        ph.uid, ph.hash_fingerprint[:8] if ph.hash_fingerprint else "")
 
     if not matched:
         return
@@ -661,7 +660,7 @@ _DB_DEFAULTS: dict[str, int | str | float | list] = {
     "introduction": "", "country_list": [], "style_list": [],
     "grading": 0, "release_date": 0,
     "all_season_episode_num": 0,
-    "collection_id": "", "ctime": 0, "utime": 0,
+    "collection_id": "", "media_lib_set_id": 0, "ctime": 0, "utime": 0,
 }
 
 

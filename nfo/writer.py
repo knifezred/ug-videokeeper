@@ -48,6 +48,7 @@ def write_nfo_from_db(nfo: NfoRecord, db: DbRecord,
     # ---- ugreen ----
     ug = nfo.ugreen
     ug.ug_video_info_id = db.ug_video_info_id
+    ug.media_lib_set_id = db.media_lib_set_id
     ug.ctime = db.ctime
     ug.utime = db.utime
     ug.genre = db.style_list or []
@@ -316,6 +317,8 @@ def _patch_nfo(nfo: NfoRecord):
     except Exception:
         log.error("_patch_nfo: plot 写入失败 nfo=%s", nfo_path)
         raise
+
+    try:
         _set_dom_text(dom, root, "year", str(o.year) if o.year else "")
         _set_dom_text(dom, root, "releasedate", o.releasedate)
         _set_dom_text(dom, root, "rating", str(o.rating) if o.rating else "")

@@ -151,7 +151,7 @@ def _exec_first_sync(conn, fr: FileRecord, folder: str, nfo: NfoRecord | None,
     if decision.scene == "1":  # 无 NFO → 创建
         log.debug("scene=1: 从 DB 创建 NFO, cat=%s folder=%s type=%s",
                   fr.category_id, folder,
-                  "episode" if fr.season_num > 0 else ("tvshow" if fr.video_type == 1 else "movie"))
+                  "episode" if fr.season_num > 0 else ("tvshow" if fr.video_type == 2 else "movie"))
         _create_nfo_from_db(conn, fr, folder)
         return decision
 
@@ -194,7 +194,7 @@ def _create_nfo_from_db(conn, fr: FileRecord, folder: str):
         log.debug("复用已有 NFO: %s (type=%s)", nfo_path, nfo_type)
     else:
         nfo_type, nfo_path = "movie", os.path.join(folder, "movie.nfo")
-        if fr.video_type == 1:
+        if fr.video_type == 2:
             if fr.season_num > 0:
                 nfo_name = os.path.splitext(fr.file_name)[0] + ".nfo"
                 nfo_type, nfo_path = "episode", os.path.join(folder, nfo_name)
@@ -245,14 +245,14 @@ def _dir_key(folder: str, season: int, file_name: str = "") -> tuple:
 def _find_nfo_for_record(fr: FileRecord) -> str | None:
     """查找 FileRecord 对应的 NFO 文件，按类型优先级匹配。
 
-    电影 (video_type=0): movie.nfo → {文件名}.nfo → 目录下任一 .nfo
-    剧集 (video_type=1, season_num>0): {文件名}.nfo → season.nfo → tvshow.nfo → 任一
-    季/剧 (video_type=1, season_num=0): tvshow.nfo → {文件名}.nfo → season.nfo → 任一
+    电影 (video_type=1): movie.nfo → {文件名}.nfo → 目录下任一 .nfo
+    剧集 (video_type=2, season_num>0): {文件名}.nfo → season.nfo → tvshow.nfo → 任一
+    季/剧 (video_type=2, season_num=0): tvshow.nfo → {文件名}.nfo → season.nfo → 任一
     """
     folder = fr.folder_path
     file_nfo = os.path.splitext(fr.file_name)[0] + ".nfo"
 
-    if fr.video_type == 0:
+    if fr.video_type == 1:
         candidates = ["movie.nfo", file_nfo]
     elif fr.season_num > 0:
         candidates = [file_nfo, "season.nfo", "tvshow.nfo"]

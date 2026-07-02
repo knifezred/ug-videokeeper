@@ -171,7 +171,7 @@ class FileRecord:
     # 关联 ug_video_info
     ug_video_info_id: int = 0
     video_name: str = ""         # ug_video_info.name
-    video_type: int = 0          # ug_video_info.type  (0=电影, 1=电视剧)
+    video_type: int = 0          # ug_video_info.type  (1=电影, 2=电视剧)
     video_season: int = 0
     video_ctime: int = 0
     video_utime: int = 0
