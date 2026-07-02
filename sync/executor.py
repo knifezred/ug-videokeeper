@@ -36,6 +36,12 @@ def run_sync() -> list[SyncResult]:
                 continue
             processed_dirs.add(dir_key)
 
+            # 电视剧：统一用 ugreen_tv.nfo 处理
+            if fr.video_type == 2:
+                tv_nfo_path = os.path.join(folder, "ugreen_tv.nfo")
+                _process_tv(conn, fr, folder, tv_nfo_path, cache, results, stats)
+                continue
+
             cached_entry = cache.get(fr.category_id)
 
             log.debug("处理: cat=%s name=%s folder=%s cache=%s",
@@ -194,16 +200,11 @@ def _create_nfo_from_db(conn, fr: FileRecord, folder: str):
         log.debug("复用已有 NFO: %s (type=%s)", nfo_path, nfo_type)
     else:
         nfo_type, nfo_path = "movie", os.path.join(folder, "movie.nfo")
-        if fr.video_type == 2:
-            if fr.season_num > 0:
-                nfo_name = os.path.splitext(fr.file_name)[0] + ".nfo"
-                nfo_type, nfo_path = "episode", os.path.join(folder, nfo_name)
-            else:
-                nfo_type, nfo_path = "tvshow", os.path.join(folder, "tvshow.nfo")
         log.debug("创建新 NFO: type=%s path=%s cat=%s", nfo_type, nfo_path, fr.category_id)
 
     nfo = NfoRecord(
         nfo_type=nfo_type, nfo_path=nfo_path, video_dir=folder,
+        official=VideoMeta(),
         ugreen=UgreenMeta(
             category_id=fr.category_id,
             ug_video_info_id=fr.ug_video_info_id,
@@ -219,6 +220,61 @@ def _create_nfo_from_db(conn, fr: FileRecord, folder: str):
         return
     log.debug("DB→NFO 写入: %s (name=%s)", nfo_path, db_rec.name)
     _db_to_nfo(conn, nfo, db_rec)
+
+
+def _ensure_season_nfo(conn, fr: FileRecord, folder: str):
+    pass  # 已废弃，由 _process_tv 统一处理
+
+
+
+def _process_tv(conn, fr: FileRecord, folder: str, nfo_path: str,
+                cache: dict, results: list, stats: dict):
+    """电视剧：读取/创建 ugreen_tv.nfo，cache 决策 + 同步"""
+    from nfo.reader import read_tv_nfo
+    from nfo.writer import write_tv_nfo
+
+    cached_entry = cache.get(fr.category_id)
+
+    if cached_entry is not None:
+        decision = decide_from_cache(
+            fr.video_ctime, fr.video_utime,
+            cached_entry.get("db_ctime", 0),
+            cached_entry.get("db_utime", 0),
+        )
+        if decision.direction == "skip":
+            stats["cached"] += 1
+            log.debug("  → %s %s", decision.scene, decision.message)
+            return
+
+        log.info("  → %s %s (TV)", decision.scene, decision.message)
+        if decision.scene == "cache.1":
+            season = read_tv_nfo(nfo_path)
+            if season:
+                queries.sync_tv_nfo_to_db(conn, season, folder)
+                stats["nfo_to_db"] = stats.get("nfo_to_db", 0) + 1
+            else:
+                stats["error"] = stats.get("error", 0) + 1
+        else:
+            season = queries.build_tv_season_from_db(conn, fr.category_id, folder)
+            if season:
+                write_tv_nfo(season, nfo_path)
+                stats["db_to_nfo"] = stats.get("db_to_nfo", 0) + 1
+        st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime, cache)
+        return
+
+    # cache 不存在 → 首次同步
+    season = read_tv_nfo(nfo_path)
+    if season:
+        log.info("  → 首次同步 TV: ugreen_tv.nfo 已存在")
+        queries.sync_tv_nfo_to_db(conn, season, folder)
+        stats["nfo_to_db"] = stats.get("nfo_to_db", 0) + 1
+    else:
+        log.info("  → 首次同步 TV: 从 DB 生成 ugreen_tv.nfo")
+        season = queries.build_tv_season_from_db(conn, fr.category_id, folder)
+        if season:
+            write_tv_nfo(season, nfo_path)
+            stats["db_to_nfo"] = stats.get("db_to_nfo", 0) + 1
+    st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime, cache)
 
 
 def _db_to_nfo(conn, nfo: NfoRecord, db_record):
@@ -246,18 +302,17 @@ def _find_nfo_for_record(fr: FileRecord) -> str | None:
     """查找 FileRecord 对应的 NFO 文件，按类型优先级匹配。
 
     电影 (video_type=1): movie.nfo → {文件名}.nfo → 目录下任一 .nfo
-    剧集 (video_type=2, season_num>0): {文件名}.nfo → season.nfo → tvshow.nfo → 任一
-    季/剧 (video_type=2, season_num=0): tvshow.nfo → {文件名}.nfo → season.nfo → 任一
+    电视剧 (video_type=2): ugreen_tv.nfo → 目录下任一 .nfo
     """
     folder = fr.folder_path
     file_nfo = os.path.splitext(fr.file_name)[0] + ".nfo"
 
     if fr.video_type == 1:
         candidates = ["movie.nfo", file_nfo]
-    elif fr.season_num > 0:
-        candidates = [file_nfo, "season.nfo", "tvshow.nfo"]
+    elif fr.video_type == 2:
+        candidates = ["ugreen_tv.nfo"]
     else:
-        candidates = ["tvshow.nfo", file_nfo, "season.nfo"]
+        candidates = [file_nfo, "season.nfo", "tvshow.nfo"]
 
     for name in candidates:
         path = os.path.join(folder, name)

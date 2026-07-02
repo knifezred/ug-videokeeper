@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from typing import Optional
 from config import log
 from models import NfoRecord, VideoMeta, UgreenMeta, Actor, PlayHistory, Favorite, FileInfo
+from models import TvSeasonRecord, TvEpisodeRecord, Collection
 
 
 def read_nfo(nfo_path: str) -> Optional[NfoRecord]:
@@ -205,3 +206,100 @@ def _parse_ugreen(root: ET.Element, meta: UgreenMeta):
                 codec=_text(audio, "codec") or "" if audio is not None else "",
                 channels=_int_text(audio, "channels") or 0 if audio is not None else 0,
             )
+
+
+# ---- TV NFO (ugreen_tv.nfo) ----
+
+def read_tv_nfo(nfo_path: str) -> Optional[TvSeasonRecord]:
+    """读取 ugreen_tv.nfo，返回 TvSeasonRecord"""
+    if not os.path.isfile(nfo_path):
+        return None
+    try:
+        tree = ET.parse(nfo_path)
+        root = tree.getroot()
+    except ET.ParseError as e:
+        log.warning("ugreen_tv.nfo 解析失败: %s — %s", nfo_path, e)
+        return None
+
+    s = TvSeasonRecord()
+    s.category_id = _text(root, "category_id") or ""
+    s.ug_video_info_id = _int_text(root, "ug_video_info_id") or 0
+    s.name = _text(root, "name") or ""
+    s.year = _int_text(root, "year") or 0
+    s.season = _int_text(root, "season") or 0
+    s.introduction = _text(root, "introduction") or ""
+    s.score = _float_text(root, "score") or 0.0
+    s.douban_id = _int_text(root, "douban_id") or 0
+    s.tmdb_id = _int_text(root, "tmdb_id") or 0
+    s.release_date = _int_text(root, "release_date") or 0
+    s.use_nfo = _int_text(root, "use_nfo") or 1
+    s.grading = _int_text(root, "grading") or 0
+    s.all_season_episode_num = _int_text(root, "all_season_episode_num") or 0
+    s.media_lib_set_id = _int_text(root, "media_lib_set_id") or 0
+    s.ctime = _int_text(root, "ctime") or 0
+    s.utime = _int_text(root, "utime") or 0
+
+    for g in root.findall("genre"):
+        if g.text:
+            s.genre.append(g.text.strip())
+
+    for ep_el in root.findall("episodes/episode"):
+        ep = TvEpisodeRecord()
+        ep.ug_television_episode_id = _int_text(ep_el, "ug_television_episode_id") or 0
+        ep.season = _int_text(ep_el, "season") or 0
+        ep.episode = _int_text(ep_el, "episode") or 0
+        ep.name = _text(ep_el, "name") or ""
+        ep.overview = _text(ep_el, "overview") or ""
+        ep.cover_path = _text(ep_el, "cover_path") or ""
+        ep.language = _text(ep_el, "language") or ""
+        ep.episode_flag = _text(ep_el, "episode_flag") or ""
+        ep.ctime = _int_text(ep_el, "ctime") or 0
+        ep.utime = _int_text(ep_el, "utime") or 0
+        ep.media_lib_set_id = _int_text(ep_el, "media_lib_set_id") or 0
+        s.episodes.append(ep)
+
+    for ph_el in root.findall("play_history"):
+        s.play_history.append(PlayHistory(
+            uid=_int_text(ph_el, "uid") or 0,
+            category_id=_text(ph_el, "category_id") or "",
+            hash_fingerprint=_text(ph_el, "hash_fingerprint") or "",
+            progress=_float_text(ph_el, "progress") or 0.0,
+            current_play_time=_int_text(ph_el, "current_play_time") or 0,
+            last_access_time=_int_text(ph_el, "last_access_time") or 0,
+            watch_status=_int_text(ph_el, "watch_status") or 1,
+            media_lib_set_id=_int_text(ph_el, "media_lib_set_id") or 0,
+            create_time=_int_text(ph_el, "create_time") or 0,
+            iso_ts=_text(ph_el, "iso_ts") or "",
+        ))
+
+    for fav_el in root.findall("favorites"):
+        s.favorites.append(Favorite(
+            uid=_int_text(fav_el, "uid") or 0,
+            create_time=_int_text(fav_el, "create_time") or 0,
+            favorites_type=_int_text(fav_el, "favorites_type") or 1,
+        ))
+
+    col_el = root.find("collection")
+    if col_el is not None:
+        cat_ids = col_el.findall("category_id")
+        s.collection = Collection(
+            name=_text(col_el, "name") or "",
+            collection_id=_text(col_el, "collection_id") or "",
+            tmdb_id=_text(col_el, "tmdb_id") or "0",
+            pinyin_first=_text(col_el, "pinyin_first") or "",
+            pinyin_full=_text(col_el, "pinyin_full") or "",
+            poster_path=_text(col_el, "poster_path") or "",
+            backdrop_path=_text(col_el, "backdrop_path") or "",
+            language=_text(col_el, "language") or "",
+            introduction=_text(col_el, "introduction") or "",
+            is_manual_create=_text(col_el, "is_manual_create") == "true",
+            media_lib_set_id=_int_text(col_el, "media_lib_set_id") or 0,
+            year=_int_text(col_el, "year") or 0,
+            score=_float_text(col_el, "score") or 0.0,
+            category_id_list=[c.text.strip() for c in cat_ids if c.text],
+            jp_name=_text(col_el, "jp_name") or "",
+            cloud_id=_text(col_el, "cloud_id") or "",
+        )
+
+    log.debug("读取 TV NFO: %s season=%d episodes=%d", nfo_path, s.season, len(s.episodes))
+    return s

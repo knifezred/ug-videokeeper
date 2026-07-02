@@ -4,7 +4,8 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from typing import Optional
 from config import log, DRY_RUN
-from models import NfoRecord, DbRecord, Actor, PlayHistory, Favorite, Collection
+from models import NfoRecord, DbRecord, TvSeasonRecord, TvEpisodeRecord
+from models import Actor, PlayHistory, Favorite, Collection
 
 
 def write_nfo(nfo: NfoRecord) -> bool:
@@ -126,8 +127,8 @@ def write_nfo_from_db(nfo: NfoRecord, db: DbRecord,
     o.tmdbid = db.tmdb_id
     o.doubanid = db.douban_id
     o.mpaa = _mpaa_str(db.grading)
-    o.season = db.season
-    o.all_season_episode_num = db.all_season_episode_num
+    o.season = o.season or db.season
+    o.all_season_episode_num = o.all_season_episode_num or db.all_season_episode_num
 
     if not os.path.isfile(nfo.nfo_path):
         write_nfo(nfo)
@@ -482,3 +483,114 @@ def _dom_sub(dom, parent, tag: str, text: str):
     el = dom.createElement(tag)
     el.appendChild(dom.createTextNode(str(text)))
     parent.appendChild(el)
+
+
+# ---- TV NFO (ugreen_tv.nfo) ----
+
+def write_tv_nfo(season: TvSeasonRecord, nfo_path: str):
+    """将 TvSeasonRecord 序列化为 ugreen_tv.nfo XML"""
+    dom = minidom.Document()
+    root = dom.createElement("ugreen_tv")
+    dom.appendChild(root)
+
+    s = season
+    _dom_sub(dom, root, "category_id", s.category_id)
+    _dom_sub(dom, root, "ug_video_info_id", str(s.ug_video_info_id))
+    _dom_sub(dom, root, "name", s.name)
+    if s.year:
+        _dom_sub(dom, root, "year", str(s.year))
+    _dom_sub(dom, root, "season", str(s.season))
+    _dom_sub(dom, root, "introduction", s.introduction)
+    if s.score:
+        _dom_sub(dom, root, "score", str(s.score))
+    if s.douban_id:
+        _dom_sub(dom, root, "douban_id", str(s.douban_id))
+    if s.tmdb_id:
+        _dom_sub(dom, root, "tmdb_id", str(s.tmdb_id))
+    if s.release_date:
+        _dom_sub(dom, root, "release_date", str(s.release_date))
+    _dom_sub(dom, root, "use_nfo", str(s.use_nfo))
+    if s.grading:
+        _dom_sub(dom, root, "grading", str(s.grading))
+    _dom_sub(dom, root, "all_season_episode_num", str(s.all_season_episode_num))
+    _dom_sub(dom, root, "media_lib_set_id", str(s.media_lib_set_id))
+    _dom_sub(dom, root, "ctime", str(s.ctime))
+    _dom_sub(dom, root, "utime", str(s.utime))
+    for g in s.genre:
+        _dom_sub(dom, root, "genre", g)
+
+    # 单集列表
+    ep_el = dom.createElement("episodes")
+    for ep in s.episodes:
+        e = dom.createElement("episode")
+        _dom_sub(dom, e, "ug_television_episode_id", str(ep.ug_television_episode_id))
+        _dom_sub(dom, e, "season", str(ep.season))
+        _dom_sub(dom, e, "episode", str(ep.episode))
+        _dom_sub(dom, e, "name", ep.name)
+        _dom_sub(dom, e, "overview", ep.overview)
+        _dom_sub(dom, e, "cover_path", ep.cover_path)
+        _dom_sub(dom, e, "language", ep.language)
+        _dom_sub(dom, e, "episode_flag", ep.episode_flag)
+        _dom_sub(dom, e, "ctime", str(ep.ctime))
+        _dom_sub(dom, e, "utime", str(ep.utime))
+        _dom_sub(dom, e, "media_lib_set_id", str(ep.media_lib_set_id))
+        ep_el.appendChild(e)
+    root.appendChild(ep_el)
+
+    # 播放记录
+    for ph in s.play_history:
+        el = dom.createElement("play_history")
+        _dom_sub(dom, el, "uid", str(ph.uid))
+        _dom_sub(dom, el, "category_id", ph.category_id)
+        _dom_sub(dom, el, "hash_fingerprint", ph.hash_fingerprint)
+        _dom_sub(dom, el, "progress", str(ph.progress))
+        _dom_sub(dom, el, "current_play_time", str(ph.current_play_time))
+        _dom_sub(dom, el, "last_access_time", str(ph.last_access_time))
+        _dom_sub(dom, el, "watch_status", str(ph.watch_status))
+        if ph.media_lib_set_id:
+            _dom_sub(dom, el, "media_lib_set_id", str(ph.media_lib_set_id))
+        if ph.create_time:
+            _dom_sub(dom, el, "create_time", str(ph.create_time))
+        if ph.iso_ts:
+            _dom_sub(dom, el, "iso_ts", ph.iso_ts)
+        root.appendChild(el)
+
+    # 收藏
+    for fav in s.favorites:
+        el = dom.createElement("favorites")
+        _dom_sub(dom, el, "uid", str(fav.uid))
+        _dom_sub(dom, el, "create_time", str(fav.create_time))
+        _dom_sub(dom, el, "favorites_type", str(fav.favorites_type))
+        root.appendChild(el)
+
+    # 合集
+    if s.collection:
+        col = dom.createElement("collection")
+        c = s.collection
+        _dom_sub(dom, col, "name", c.name)
+        _dom_sub(dom, col, "collection_id", c.collection_id)
+        _dom_sub(dom, col, "tmdb_id", c.tmdb_id)
+        _dom_sub(dom, col, "pinyin_first", c.pinyin_first)
+        _dom_sub(dom, col, "pinyin_full", c.pinyin_full)
+        _dom_sub(dom, col, "poster_path", c.poster_path)
+        _dom_sub(dom, col, "backdrop_path", c.backdrop_path)
+        _dom_sub(dom, col, "language", c.language)
+        _dom_sub(dom, col, "introduction", c.introduction)
+        if c.is_manual_create:
+            _dom_sub(dom, col, "is_manual_create", "true")
+        if c.media_lib_set_id:
+            _dom_sub(dom, col, "media_lib_set_id", str(c.media_lib_set_id))
+        if c.year:
+            _dom_sub(dom, col, "year", str(c.year))
+        if c.score:
+            _dom_sub(dom, col, "score", str(c.score))
+        for cid in c.category_id_list:
+            _dom_sub(dom, col, "category_id", cid)
+        _dom_sub(dom, col, "jp_name", c.jp_name)
+        _dom_sub(dom, col, "cloud_id", c.cloud_id)
+        root.appendChild(col)
+
+    os.makedirs(os.path.dirname(nfo_path), exist_ok=True)
+    with open(nfo_path, "w", encoding="utf-8") as f:
+        f.write(dom.toprettyxml(indent="  "))
+    log.info("写入 TV NFO: %s", nfo_path)

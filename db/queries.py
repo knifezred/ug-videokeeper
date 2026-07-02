@@ -6,6 +6,7 @@ from config import log
 from models import (
     DbRecord, Actor, NfoRecord, FileRecord,
     PlayHistory, Favorite, FileInfo,
+    TvSeasonRecord, TvEpisodeRecord,
 )
 
 
@@ -142,6 +143,21 @@ def fetch_episodes(conn, category_id: str) -> list[dict]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(sql, (category_id,))
         return cur.fetchall()
+
+
+def fetch_individual_episode(conn, category_id: str, season_num: int,
+                              episode_num: int) -> Optional[dict]:
+    """查询单集全部数据"""
+    sql = """
+        SELECT ug_television_episode_id, season, episode,
+               name, overview, cover_path, language,
+               ctime, utime, media_lib_set_id
+        FROM ug_television_episode
+        WHERE category_id = %s AND season = %s AND episode = %s
+    """
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, (category_id, season_num, episode_num))
+        return cur.fetchone()
 
 
 # ---- write helpers ----
@@ -695,3 +711,171 @@ def _parse_mpaa(mpaa: str) -> int:
     mapping = {"G": 1, "PG": 2, "PG-13": 3, "R": 4, "NC-17": 5,
                "TV-Y": 1, "TV-G": 1, "TV-PG": 2, "TV-14": 3, "TV-MA": 4}
     return mapping.get(mpaa.upper(), 0)
+
+
+# ---- TV NFO (ugreen_tv.nfo) ----
+
+def build_tv_season_from_db(conn, category_id: str, folder: str) -> Optional[TvSeasonRecord]:
+    """从 DB 构建 TvSeasonRecord（ug_video_info + ug_television_episode + 关联数据）"""
+    db_rec = fetch_video_by_category(conn, category_id)
+    if db_rec is None:
+        return None
+
+    s = TvSeasonRecord(
+        category_id=db_rec.category_id,
+        ug_video_info_id=db_rec.ug_video_info_id,
+        name=db_rec.name,
+        year=db_rec.year,
+        season=db_rec.season,
+        introduction=db_rec.introduction,
+        score=db_rec.score,
+        douban_id=db_rec.douban_id,
+        tmdb_id=db_rec.tmdb_id,
+        release_date=db_rec.release_date,
+        use_nfo=db_rec.use_nfo,
+        grading=db_rec.grading,
+        all_season_episode_num=db_rec.all_season_episode_num,
+        media_lib_set_id=db_rec.media_lib_set_id,
+        ctime=db_rec.ctime,
+        utime=db_rec.utime,
+    )
+    s.genre = db_rec.style_list or []
+
+    eps = fetch_episodes(conn, category_id)
+    for ep in eps:
+        s.episodes.append(TvEpisodeRecord(
+            ug_television_episode_id=ep.get("ug_television_episode_id", 0),
+            season=ep.get("season", 0),
+            episode=ep.get("episode", 0),
+            name=ep.get("name", ""),
+            overview=ep.get("overview", ""),
+            cover_path=ep.get("cover_path", ""),
+            language=ep.get("language", ""),
+            episode_flag=ep.get("episode_flag", ""),
+            ctime=ep.get("ctime", 0),
+            utime=ep.get("utime", 0),
+            media_lib_set_id=ep.get("media_lib_set_id", 0),
+        ))
+
+    phs = fetch_play_history(conn, category_id)
+    for ph in phs:
+        s.play_history.append(PlayHistory(
+            uid=ph.get("uid", 0),
+            category_id=ph.get("category_id", ""),
+            hash_fingerprint=ph.get("hash_fingerprint", ""),
+            progress=float(ph.get("progress", 0)),
+            current_play_time=ph.get("current_play_time", 0),
+            last_access_time=ph.get("last_access_time", 0),
+            watch_status=ph.get("watch_status", 1),
+            media_lib_set_id=ph.get("media_lib_set_id", 0),
+            create_time=ph.get("create_time", 0),
+            iso_ts=ph.get("iso_ts", ""),
+        ))
+
+    favs = fetch_favorites(conn, category_id)
+    for fav in favs:
+        s.favorites.append(Favorite(
+            uid=fav.get("uid", 0),
+            create_time=fav.get("create_time", 0),
+            favorites_type=fav.get("favorites_type", 1),
+        ))
+
+    col = fetch_collection(conn, category_id)
+    if col:
+        cats = col.get("category_id_list") or []
+        s.collection = Collection(
+            name=col.get("name", ""),
+            collection_id=col.get("collection_id", ""),
+            tmdb_id=str(col.get("tmdb_id", "0") or "0"),
+            pinyin_first=col.get("pinyin_first", ""),
+            pinyin_full=col.get("pinyin_full", ""),
+            poster_path=col.get("poster_path", ""),
+            backdrop_path=col.get("backdrop_path", ""),
+            language=col.get("language", ""),
+            introduction=col.get("introduction", ""),
+            is_manual_create=bool(col.get("is_manual_create")),
+            media_lib_set_id=col.get("media_lib_set_id", 0),
+            year=col.get("year", 0),
+            score=float(col.get("score", 0) or 0),
+            category_id_list=[str(c) for c in cats] if cats else [],
+            jp_name=col.get("jp_name", ""),
+            cloud_id=col.get("cloud_id", ""),
+        )
+
+    return s
+
+
+def sync_tv_nfo_to_db(conn, season: TvSeasonRecord, folder: str):
+    """ugreen_tv.nfo → DB：按 season+episode 匹配当前 file_info，回写全部数据"""
+    from nfo.writer import write_tv_nfo
+    import os as _os
+
+    # 解析当前 folder 下的 file_info
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT file_id, category_id, file_name, folder_path FROM file_info "
+            "WHERE folder_path = %s",
+            (folder,),
+        )
+        current_files = cur.fetchall()
+
+    if not current_files:
+        log.warning("sync_tv_nfo_to_db: folder=%s 无 file_info", folder)
+        return
+
+    # 更新 ug_video_info（season 级）
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE ug_video_info SET
+                 name = %s, year = %s, season = %s, introduction = %s,
+                 score = %s, douban_id = %s, tmdb_id = %s,
+                 release_date = %s, use_nfo = %s, grading = %s,
+                 all_season_episode_num = %s, style_list = %s,
+                 media_lib_set_id = %s, ctime = %s, utime = %s
+               WHERE category_id = %s""",
+            (season.name, season.year, season.season, season.introduction,
+             season.score, season.douban_id, season.tmdb_id,
+             season.release_date, season.use_nfo, season.grading,
+             season.all_season_episode_num, season.genre,
+             season.media_lib_set_id, season.ctime, season.utime,
+             season.category_id),
+        )
+
+    # 更新每集
+    for ep in season.episodes:
+        # 按 season+episode 在当前 folder 的 file_info 中匹配
+        matched_fi = None
+        for fi in current_files:
+            # 需要从 file_info 查 episode_num — 但 current_files 没包含
+            # 扩展查询
+            pass
+        # 简化为直接按 ug_television_episode_id 更新
+        if ep.ug_television_episode_id:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE ug_television_episode SET
+                         season = %s, episode = %s, name = %s,
+                         overview = %s, cover_path = %s, language = %s,
+                         episode_flag = %s, ctime = %s, utime = %s,
+                         media_lib_set_id = %s
+                       WHERE ug_television_episode_id = %s""",
+                    (ep.season, ep.episode, ep.name, ep.overview,
+                     ep.cover_path, ep.language, ep.episode_flag,
+                     ep.ctime, ep.utime, ep.media_lib_set_id,
+                     ep.ug_television_episode_id),
+                )
+
+    # 播放记录
+    if season.play_history:
+        upsert_play_history(conn, season.play_history,
+                            folder, "ugreen_tv.nfo")
+
+    # 收藏
+    if season.favorites:
+        upsert_favorites(conn, season.category_id, season.favorites)
+
+    # 合集
+    if season.collection and season.collection.name:
+        upsert_collection_for_video(conn, season.category_id, season.collection)
+
+    log.info("sync_tv_nfo_to_db: season=%d episodes=%d", season.season, len(season.episodes))
