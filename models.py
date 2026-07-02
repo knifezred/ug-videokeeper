@@ -12,17 +12,40 @@ class Actor:
 
 @dataclass
 class Collection:
-    name: str
-    tmdbid: int = 0
+    """ug_collection 完整字段（除 ug_collection_id 自增）"""
+    name: str = ""
+    collection_id: str = ""
+    tmdb_id: str = "0"
+    pinyin_first: str = ""
+    pinyin_full: str = ""
+    poster_path: str = ""
+    backdrop_path: str = ""
+    language: str = ""
+    introduction: str = ""
+    is_manual_create: bool = False
+    media_lib_set_id: int = 0
+    year: int = 0
+    score: float = 0.0
+    category_id_list: list[str] = field(default_factory=list)
+    src_type: int = 0
+    jp_name: str = ""
+    cloud_id: str = ""
+    ctime: int = 0
+    utime: int = 0
 
 
 @dataclass
 class PlayHistory:
     uid: int
+    category_id: str = ""       # NFO 存储用；恢复时用 hash_fingerprint 实时查
+    hash_fingerprint: str = ""  # 普通文件来自 DB，strm 客户端自算
     progress: float = 0.0
     current_play_time: int = 0
     last_access_time: int = 0
     watch_status: int = 1
+    media_lib_set_id: int = 0
+    create_time: int = 0
+    iso_ts: str = ""
 
 
 @dataclass

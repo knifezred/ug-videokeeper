@@ -141,22 +141,41 @@ def _parse_ugreen(root: ET.Element, meta: UgreenMeta):
     col_el = ug.find("collection")
     if col_el is not None:
         from models import Collection
+        cat_ids = col_el.findall("category_id")
         meta.collection = Collection(
             name=_text(col_el, "name") or "",
-            tmdbid=_int_text(col_el, "tmdbid") or 0,
+            collection_id=_text(col_el, "collection_id") or "",
+            tmdb_id=_text(col_el, "tmdb_id") or "0",
+            pinyin_first=_text(col_el, "pinyin_first") or "",
+            pinyin_full=_text(col_el, "pinyin_full") or "",
+            poster_path=_text(col_el, "poster_path") or "",
+            backdrop_path=_text(col_el, "backdrop_path") or "",
+            language=_text(col_el, "language") or "",
+            introduction=_text(col_el, "introduction") or "",
+            is_manual_create=_text(col_el, "is_manual_create") == "true",
+            media_lib_set_id=_int_text(col_el, "media_lib_set_id") or 0,
+            year=_int_text(col_el, "year") or 0,
+            score=_float_text(col_el, "score") or 0.0,
+            category_id_list=[c.text.strip() for c in cat_ids if c.text],
+            ctime=_int_text(col_el, "ctime") or 0,
+            utime=_int_text(col_el, "utime") or 0,
+            src_type=_int_text(col_el, "src_type") or 0,
+            jp_name=_text(col_el, "jp_name") or "",
+            cloud_id=_text(col_el, "cloud_id") or "",
         )
 
     for ph_el in ug.findall("play_history"):
-        uid = _int_text(ph_el, "uid") or 0
-        prog = _float_text(ph_el, "progress") or 0.0
-        cpt = _int_text(ph_el, "current_play_time") or 0
-        lat = _int_text(ph_el, "last_access_time") or 0
-        ws = _int_text(ph_el, "watch_status") or 1
-        log.debug("解析 play_history: uid=%d progress=%.1f play_time=%d last=%d status=%d",
-                  uid, prog, cpt, lat, ws)
         meta.play_history.append(PlayHistory(
-            uid=uid, progress=prog, current_play_time=cpt,
-            last_access_time=lat, watch_status=ws,
+            uid=_int_text(ph_el, "uid") or 0,
+            category_id=_text(ph_el, "category_id") or "",
+            hash_fingerprint=_text(ph_el, "hash_fingerprint") or "",
+            progress=_float_text(ph_el, "progress") or 0.0,
+            current_play_time=_int_text(ph_el, "current_play_time") or 0,
+            last_access_time=_int_text(ph_el, "last_access_time") or 0,
+            watch_status=_int_text(ph_el, "watch_status") or 1,
+            media_lib_set_id=_int_text(ph_el, "media_lib_set_id") or 0,
+            create_time=_int_text(ph_el, "create_time") or 0,
+            iso_ts=_text(ph_el, "iso_ts") or "",
         ))
 
     for fav_el in ug.findall("favorites"):
