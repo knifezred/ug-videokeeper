@@ -42,13 +42,16 @@ def decide_first_sync(json_ctime: int, db_ctime: int) -> SyncResult:
 
 def decide_from_cache(db_ctime: int, db_utime: int,
                        cache_ctime: int, cache_utime: int,
-                       db_vid: int = 0, cache_vid: int = 0) -> SyncResult:
+                       db_vid: int = 0, cache_vid: int = 0,
+                       db_mtime: int = 0, cache_mtime: int = 0,
+                       db_hash: str = "", cache_hash: str = "") -> SyncResult:
     """
-    cache 存在时的决策（纯 DB vs cache，不读文件）。
+    cache 存在时的决策。
 
     cache.1: DB.ctime > cache.ctime 或 vid 变化 → NFO/JSON → DB  (重新刮削)
-    cache.2: ctime+vid 一致、DB.utime > cache.utime → DB → JSON  (用户编辑)
-    cache.3: 时间一致 → skip
+    cache.2: 以上无变化，但 max_mtime > cache_max_mtime → DB → JSON  (用户行为)
+    cache.4: 以上无变化，但 content_hash 变化 → DB → JSON  (编辑 ug_video_info)
+    cache.3: 全部一致 → skip
     """
     result = SyncResult()
 
@@ -63,15 +66,25 @@ def decide_from_cache(db_ctime: int, db_utime: int,
         log.debug("策略决策 cache.1: %s → NFO/JSON→DB", cause)
         return result
 
-    if db_ctime == cache_ctime and db_utime > cache_utime:
+    if db_mtime > cache_mtime:
         result.direction = "db_to_json"
         result.scene = "cache.2"
         result.message = (
-            f"用户编辑了数据 (db_utime={db_utime} > cache_utime={cache_utime})，"
+            f"用户行为触发同步 (max_mtime={db_mtime} > cache_mtime={cache_mtime})，"
             f"刷新 .ugreen.json"
         )
-        log.debug("策略决策 cache.2: db_utime=%d > cache_utime=%d → DB→JSON",
-                  db_utime, cache_utime)
+        log.debug("策略决策 cache.2: max_mtime=%d > cache_mtime=%d → DB→JSON",
+                  db_mtime, cache_mtime)
+        return result
+
+    if db_hash and cache_hash and db_hash != cache_hash:
+        result.direction = "db_to_json"
+        result.scene = "cache.4"
+        result.message = (
+            f"用户编辑了视频信息 (hash 变化: {db_hash[:8]}... → {cache_hash[:8]}...)，"
+            f"刷新 .ugreen.json"
+        )
+        log.debug("策略决策 cache.4: hash 变化 → DB→JSON")
         return result
 
     result.direction = "skip"

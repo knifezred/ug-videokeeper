@@ -9,7 +9,6 @@ from nfo.writer import write_ugreen_from_db
 from sync.strategy import decide_first_sync, decide_from_cache
 from models import NfoRecord, VideoMeta, SyncResult, FileRecord
 from models import UgreenRecord, PlayHistory, Favorite, Collection
-from utils import compute_file_hash
 import state as st
 
 
@@ -52,6 +51,10 @@ def run_sync() -> list[SyncResult]:
                     cached_entry.get("db_utime", 0),
                     db_vid=fr.ug_video_info_id,
                     cache_vid=cached_entry.get("db_vid", 0),
+                    db_mtime=fr.max_mtime,
+                    cache_mtime=cached_entry.get("max_mtime", 0),
+                    db_hash=fr.content_hash,
+                    cache_hash=cached_entry.get("content_hash", ""),
                 )
                 if decision.direction == "skip":
                     stats["cached"] += 1
@@ -109,6 +112,7 @@ def _exec_cached(conn, fr: FileRecord, folder: str, nfo_path: str | None,
         if nfo is None:
             nfo = NfoRecord(video_dir=folder, official=VideoMeta())
             log.debug("cache.1: 无有效 NFO，仅从 .ugreen.json 恢复 cat=%s", fr.category_id)
+        nfo.category_id = fr.category_id  # 优先用 file_info 中的 category_id
         db_sync.sync_nfo_to_db(conn, nfo)
         log.info("cache.1: 恢复完成, cat=%s", fr.category_id)
         return decision
@@ -131,6 +135,7 @@ def _exec_first_sync(conn, fr: FileRecord, folder: str,
         if nfo is None:
             nfo = NfoRecord(video_dir=folder, official=VideoMeta())
         log.debug("first.1: 恢复 DB, cat=%s", fr.category_id)
+        nfo.category_id = fr.category_id
         db_sync.sync_nfo_to_db(conn, nfo)
         return decision
 
@@ -156,7 +161,13 @@ def _write_ugreen_from_db(conn, category_id: str, folder: str):
     log.debug("DB→JSON: cat=%s actors=%d play=%d fav=%d col=%s",
               category_id, len(db_actors), len(db_play), len(db_fav),
               db_col["name"] if db_col else "无")
-    write_ugreen_from_db(folder, db_rec, db_play, db_fav, db_col)
+
+    # 读取旧 .ugreen.json 的 play_history，用于合并历史记录
+    old_ug = ugreen.read_ugreen(folder)
+    old_ph = old_ug.play_history if old_ug else None
+    log.info("play_history 合并准备: 旧=%s 条 new=%d 条",
+             len(old_ph) if old_ph else "无", len(db_play))
+    write_ugreen_from_db(folder, db_rec, db_play, db_fav, db_col, old_ph_list=old_ph)
 
 
 # ---- 电视剧 ----
@@ -173,6 +184,10 @@ def _process_tv(conn, fr: FileRecord, folder: str,
             cached_entry.get("db_utime", 0),
             db_vid=fr.ug_video_info_id,
             cache_vid=cached_entry.get("db_vid", 0),
+            db_mtime=fr.max_mtime,
+            cache_mtime=cached_entry.get("max_mtime", 0),
+            db_hash=fr.content_hash,
+            cache_hash=cached_entry.get("content_hash", ""),
         )
         if decision.direction == "skip":
             stats["cached"] += 1
@@ -182,6 +197,7 @@ def _process_tv(conn, fr: FileRecord, folder: str,
         if decision.scene == "cache.1":
             ug = ugreen.read_ugreen(folder)
             if ug:
+                ug.category_id = fr.category_id  # 优先用 file_info 最新值
                 _restore_tv_from_ugreen(conn, ug, folder)
                 stats["nfo_to_db"] = stats.get("nfo_to_db", 0) + 1
             else:
@@ -196,6 +212,7 @@ def _process_tv(conn, fr: FileRecord, folder: str,
     ug = ugreen.read_ugreen(folder)
     if ug:
         log.info("  → 首次同步 TV: .ugreen.json 存在 → 恢复")
+        ug.category_id = fr.category_id
         _restore_tv_from_ugreen(conn, ug, folder)
         stats["nfo_to_db"] = stats.get("nfo_to_db", 0) + 1
     else:
@@ -206,20 +223,42 @@ def _process_tv(conn, fr: FileRecord, folder: str,
 
 
 def _restore_tv_from_ugreen(conn, ug, folder: str):
-    """.ugreen.json → DB：写入官方字段 + 剧集 + 扩展数据"""
+    """.ugreen.json → DB：ug_video_info 全字段回写 + 剧集 + 扩展数据"""
+    from utils import fix_paths_for_video_dir
+    fix_paths_for_video_dir(ug, folder)
     with conn.cursor() as cur:
         cur.execute(
             """UPDATE ug_video_info SET
-                 name = %s, year = %s, season = %s, introduction = %s,
+                 name = %s, pinyin_first = %s, pinyin_full = %s, to9_digit = %s,
+                 year = %s, season = %s, introduction = %s,
                  score = %s, douban_id = %s, tmdb_id = %s,
-                 release_date = %s, grading = %s, style_list = %s,
-                 all_season_episode_num = %s, media_lib_set_id = %s,
+                 style_list = %s, grading = %s,
+                 release_date = %s, last_release_date = %s,
+                 all_season_episode_num = %s,
+                 country_list = %s, type = %s, use_nfo = %s,
+                 poster_path = %s, backdrop_path = %s,
+                 logo_path = %s, tagline = %s,
+                 no_lang_poster_path = %s, no_lang_backdrop_path = %s,
+                 language = %s, old_category_id = %s,
+                 collection_id = %s, collection_time = %s,
+                 media_lib_set_id = %s, last_play_file_path = %s,
+                 jp_name = %s, ug_media_id = %s,
                  ctime = %s, utime = %s
                WHERE category_id = %s""",
-            (ug.name, ug.year, ug.season, ug.introduction,
+            (ug.name, ug.pinyin_first, ug.pinyin_full, ug.to9_digit,
+             ug.year, ug.season, ug.introduction,
              ug.score, ug.douban_id, ug.tmdb_id,
-             ug.release_date, ug.grading, ug.style_list,
-             ug.all_season_episode_num, ug.media_lib_set_id,
+             ug.style_list, ug.grading,
+             ug.release_date, ug.last_release_date,
+             ug.all_season_episode_num,
+             ug.country_list, ug.type, ug.use_nfo,
+             ug.poster_path, ug.backdrop_path,
+             ug.logo_path, ug.tagline,
+             ug.no_lang_poster_path, ug.no_lang_backdrop_path,
+             ug.language, ug.old_category_id,
+             ug.collection_id, ug.collection_time,
+             ug.media_lib_set_id, ug.last_play_file_path,
+             ug.jp_name, ug.ug_media_id,
              ug.ctime, ug.utime, ug.category_id),
         )
     for ep in ug.episodes:
@@ -258,23 +297,16 @@ def _dump_tv_to_ugreen(conn, category_id: str, folder: str):
     favs = queries.fetch_favorites(conn, category_id)
     col = queries.fetch_collection(conn, category_id)
 
-    ph_list = []
-    for ph in phs:
-        hash_fp = ph.get("hash_fingerprint", "") or ""
-        if not hash_fp:
-            fn, fp = ph.get("file_name", ""), ph.get("folder_path", "")
-            if fn and fp and fn.endswith(".strm") and os.path.isfile(os.path.join(fp, fn)):
-                try: hash_fp = compute_file_hash(os.path.join(fp, fn))
-                except OSError: pass
-        ph_list.append(PlayHistory(
-            uid=ph.get("uid", 0), category_id=ph.get("category_id", ""),
-            hash_fingerprint=hash_fp, progress=float(ph.get("progress", 0)),
-            current_play_time=ph.get("current_play_time", 0),
-            last_access_time=ph.get("last_access_time", 0),
-            watch_status=ph.get("watch_status", 1),
-            media_lib_set_id=ph.get("media_lib_set_id", 0),
-            create_time=ph.get("create_time", 0), iso_ts=ph.get("iso_ts", ""),
-        ))
+    from nfo.writer import _build_ph_list, _merge_play_history
+    new_ph = _build_ph_list(phs)
+    old_ug = ugreen.read_ugreen(folder)
+    if old_ug and old_ug.play_history:
+        ph_list = _merge_play_history(old_ug.play_history, new_ph)
+        log.info("TV play_history 合并: 旧=%d 新=%d 合并后=%d",
+                 len(old_ug.play_history), len(new_ph), len(ph_list))
+    else:
+        ph_list = new_ph
+        log.info("TV play_history: 无旧记录，仅写入 DB 数据 (%d 条)", len(new_ph))
 
     fav_list = [Favorite(**{k: v for k, v in f.items()}) for f in favs]
     col_obj = None
@@ -295,17 +327,33 @@ def _dump_tv_to_ugreen(conn, category_id: str, folder: str):
         )
 
     record = UgreenRecord(
-        type="tvshow", category_id=category_id,
+        category_id=category_id,
         ug_video_info_id=db_rec.ug_video_info_id,
         media_lib_set_id=db_rec.media_lib_set_id,
         ctime=db_rec.ctime, utime=db_rec.utime,
-        name=db_rec.name, year=db_rec.year,
-        introduction=db_rec.introduction, score=db_rec.score,
-        tmdb_id=db_rec.tmdb_id, douban_id=db_rec.douban_id,
+        name=db_rec.name or "", pinyin_first=db_rec.pinyin_first or "",
+        pinyin_full=db_rec.pinyin_full or "", to9_digit=db_rec.to9_digit or "",
+        year=db_rec.year, season=db_rec.season,
+        introduction=db_rec.introduction or "", score=db_rec.score,
+        douban_id=db_rec.douban_id, tmdb_id=db_rec.tmdb_id,
         style_list=db_rec.style_list or [], grading=db_rec.grading,
         release_date=db_rec.release_date,
+        last_release_date=db_rec.last_release_date,
         all_season_episode_num=db_rec.all_season_episode_num,
-        genre=db_rec.style_list or [], season=db_rec.season,
+        country_list=db_rec.country_list or [], type=db_rec.type,
+        use_nfo=db_rec.use_nfo,
+        poster_path=db_rec.poster_path or "",
+        backdrop_path=db_rec.backdrop_path or "",
+        logo_path=db_rec.logo_path or "", tagline=db_rec.tagline or "",
+        no_lang_poster_path=db_rec.no_lang_poster_path or "",
+        no_lang_backdrop_path=db_rec.no_lang_backdrop_path or "",
+        language=db_rec.language or "",
+        old_category_id=db_rec.old_category_id or "",
+        collection_id=db_rec.collection_id or "",
+        collection_time=db_rec.collection_time,
+        last_play_file_path=db_rec.last_play_file_path or "",
+        jp_name=db_rec.jp_name or "", ug_media_id=db_rec.ug_media_id or "",
+        genre=db_rec.style_list or [],
         episodes=eps, play_history=ph_list,
         favorites=fav_list, collection=col_obj,
     )
@@ -339,7 +387,8 @@ def _find_nfo_for_record(fr: FileRecord) -> str | None:
 
 def _update_cache(cache: dict, fr: FileRecord):
     st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime,
-                    cache, db_vid=fr.ug_video_info_id)
+                    cache, db_vid=fr.ug_video_info_id, max_mtime=fr.max_mtime,
+                    content_hash=fr.content_hash)
 
 
 def _log_summary(stats: dict, total: int):

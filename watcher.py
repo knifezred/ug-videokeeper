@@ -130,6 +130,26 @@ class Watcher:
                 nfo = NfoRecord(nfo_path=nfo_path, video_dir=video_dir,
                                 official=VideoMeta())
 
+            # NFO 字段合并到 .ugreen.json（仅 watchdog 路径）
+            if nfo.official.title:
+                ug.name = nfo.official.title
+            if nfo.official.year:
+                ug.year = nfo.official.year
+            if nfo.official.plot:
+                ug.introduction = nfo.official.plot
+            if nfo.official.rating:
+                ug.score = nfo.official.rating
+            if nfo.official.tmdbid:
+                ug.tmdb_id = nfo.official.tmdbid
+            if nfo.official.doubanid:
+                ug.douban_id = nfo.official.doubanid
+            if nfo.official.releasedate:
+                from utils import date_str_to_int
+                v = date_str_to_int(nfo.official.releasedate)
+                if v:
+                    ug.release_date = v
+            ugreen.write_ugreen(video_dir, ug)
+
             conn = connect()
             try:
                 db_rec = queries.fetch_video_by_category(conn, cat)
@@ -156,7 +176,7 @@ class Watcher:
                 fresh = queries.fetch_video_by_category(conn, resolved_cat)
                 if fresh:
                     st.update_cache(resolved_cat, fresh.ctime, nfo_mtime, cache,
-                                    db_vid=fresh.ug_video_info_id)
+                                    db_vid=fresh.ug_video_info_id, max_mtime=nfo_mtime)
                 else:
                     st.update_cache(resolved_cat, 0, nfo_mtime, cache)
                 st.save(cache)

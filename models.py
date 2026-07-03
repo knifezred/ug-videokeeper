@@ -66,9 +66,8 @@ class FileInfo:
 
 @dataclass
 class UgreenRecord:
-    """.ugreen.json 完整数据 — 替代 NFO <ugreen> + TV NFO + 官方字段备份"""
+    """.ugreen.json 完整数据 — ug_video_info 全部非主键字段 + 扩展数据"""
     version: int = 1
-    type: str = "movie"            # "movie" | "tvshow"
 
     # 同步决策字段
     category_id: str = ""
@@ -77,26 +76,46 @@ class UgreenRecord:
     ctime: int = 0
     utime: int = 0
 
-    # 官方字段（全量备份）
+    # ug_video_info 全部字段（除 ug_video_info_id 自增主键）
     name: str = ""
+    pinyin_first: str = ""
+    pinyin_full: str = ""
+    to9_digit: str = ""
     year: int = 0
+    season: int = 0
     introduction: str = ""
     score: float = 0.0
-    tmdb_id: int = 0
     douban_id: int = 0
+    tmdb_id: int = 0
     style_list: list[int] = field(default_factory=list)
     grading: int = 0
     release_date: int = 0
+    last_release_date: int = 0
     all_season_episode_num: int = 0
+    country_list: list[int] = field(default_factory=list)
+    type: int = 0
+    use_nfo: int = 1
+    poster_path: str = ""
+    backdrop_path: str = ""
+    logo_path: str = ""
+    tagline: str = ""
+    no_lang_poster_path: str = ""
+    no_lang_backdrop_path: str = ""
+    language: str = ""
+    old_category_id: str = ""
+    collection_id: str = ""
+    collection_time: int = 0
+    last_play_file_path: str = ""
+    jp_name: str = ""
+    ug_media_id: str = ""
 
-    # 绿联扩展
+    # 绿联扩展（来自 play_history / favorites / ug_collection）
     genre: list[str] = field(default_factory=list)
     play_history: list[PlayHistory] = field(default_factory=list)
     favorites: list[Favorite] = field(default_factory=list)
     collection: Optional[Collection] = None
 
     # 电视剧专用
-    season: int = 0
     episodes: list[dict] = field(default_factory=list)
 
     def __post_init__(self):
@@ -145,30 +164,41 @@ class NfoRecord:
 
 @dataclass
 class DbRecord:
-    """数据库查询结果 — ug_video_info 行"""
+    """数据库查询结果 — ug_video_info 行（全字段）"""
     ug_video_info_id: int = 0
     category_id: str = ""
     name: str = ""
-    douban_id: int = 0
-    tmdb_id: int = 0
-    use_nfo: int = 1
-    score: float = 0.0
+    pinyin_first: str = ""
+    pinyin_full: str = ""
+    to9_digit: str = ""
     year: int = 0
     season: int = 0
     introduction: str = ""
-    country_list: list[str] = field(default_factory=list)
-    style_list: list[str] = field(default_factory=list)
+    score: float = 0.0
+    douban_id: int = 0
+    tmdb_id: int = 0
+    style_list: list[int] = field(default_factory=list)
     grading: int = 0
     release_date: int = 0
+    last_release_date: int = 0
+    all_season_episode_num: int = 0
+    country_list: list[int] = field(default_factory=list)
+    type: int = 0
     poster_path: str = ""
     backdrop_path: str = ""
     logo_path: str = ""
     tagline: str = ""
+    no_lang_poster_path: str = ""
+    no_lang_backdrop_path: str = ""
     language: str = ""
+    old_category_id: str = ""
     collection_id: str = ""
     collection_time: int = 0
     media_lib_set_id: int = 0
-    all_season_episode_num: int = 0
+    last_play_file_path: str = ""
+    jp_name: str = ""
+    ug_media_id: str = ""
+    use_nfo: int = 1
     ctime: int = 0
     utime: int = 0
 
@@ -205,3 +235,5 @@ class FileRecord:
     video_season: int = 0
     video_ctime: int = 0
     video_utime: int = 0
+    max_mtime: int = 0          # 五张表的最新时间戳（用于缓存决策）
+    content_hash: str = ""      # 9 个用户可编辑字段的哈希（检测 u время 不变时的内容变化）

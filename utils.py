@@ -51,3 +51,27 @@ def date_str_to_int(date_str: str) -> int:
         return int(dt.timestamp())
     except ValueError:
         return 0
+
+
+# ---- 路径修正 ----
+
+import os as _os
+
+_IMAGE_FIELDS = ("poster_path", "backdrop_path", "logo_path",
+                 "no_lang_poster_path", "no_lang_backdrop_path",
+                 "last_play_file_path")
+
+
+def fix_paths_for_video_dir(ug, video_dir: str):
+    """当文件夹路径与 .ugreen.json 中的路径不一致时，修正图片和播放路径。
+    仅处理本地绝对路径（/ 开头且不是 http），提取文件名拼接到当前目录，
+    文件存在则更新，不存在保留旧值。
+    """
+    for attr in _IMAGE_FIELDS:
+        old = getattr(ug, attr, None)
+        if not old or not old.startswith("/") or old.startswith("http"):
+            continue
+        basename = _os.path.basename(old)
+        new_path = _os.path.join(video_dir, basename)
+        if new_path != old and _os.path.isfile(new_path):
+            setattr(ug, attr, new_path)

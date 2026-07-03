@@ -90,16 +90,6 @@ def _parse_official(root: ET.Element, meta: VideoMeta, present: set[str]):
     meta.seasonnumber = _int_text(root, "seasonnumber") or 0
     meta.all_season_episode_num = _int_text(root, "all_season_episode_num") or 0
 
-    countries = [c.text.strip() for c in root.findall("country") if c.text]
-    if countries:
-        meta.country = countries
-        present.add("country")
-
-    genres = [g.text.strip() for g in root.findall("genre") if g.text]
-    if genres:
-        meta.genre = genres
-        present.add("genre")
-
     actor_els = root.findall("actor")
     if actor_els:
         present.add("actor")

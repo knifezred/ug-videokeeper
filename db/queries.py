@@ -8,13 +8,19 @@ from models import DbRecord, FileRecord
 # ---- 视频 ----
 
 def fetch_video_by_category(conn, category_id: str) -> Optional[DbRecord]:
-    """按 category_id 查询 ug_video_info（只 SELECT 同步所需列）"""
+    """按 category_id 查询 ug_video_info 全部列（除自增主键 ug_video_info_id）"""
     sql = """
-        SELECT ug_video_info_id, category_id, name, douban_id, tmdb_id,
-               score, year, season, introduction,
-               country_list, style_list, grading,
-               release_date, all_season_episode_num,
-               collection_id, media_lib_set_id, ctime, utime
+        SELECT ug_video_info_id, category_id, name,
+               pinyin_first, pinyin_full, to9_digit,
+               year, season, introduction, score,
+               douban_id, tmdb_id, style_list, grading,
+               release_date, last_release_date, all_season_episode_num,
+               country_list, type,
+               poster_path, backdrop_path, logo_path, tagline,
+               no_lang_poster_path, no_lang_backdrop_path,
+               language, old_category_id, collection_id, collection_time,
+               media_lib_set_id, last_play_file_path,
+               jp_name, ug_media_id, ctime, utime
         FROM ug_video_info
         WHERE category_id = %s
     """
@@ -42,9 +48,36 @@ def fetch_all_file_info(conn, path_prefix: str = "") -> list[FileRecord]:
             COALESCE(v.type, 0) AS video_type,
             COALESCE(v.season, 0) AS video_season,
             COALESCE(v.ctime, 0) AS video_ctime,
-            COALESCE(v.utime, 0) AS video_utime
+            COALESCE(v.utime, 0) AS video_utime,
+            GREATEST(
+                COALESCE(v.ctime, 0),
+                COALESCE(v.utime, 0),
+                COALESCE(ph.max_play, 0),
+                COALESCE(fv.max_fav, 0),
+                COALESCE(c.utime, 0)
+            ) AS max_mtime,
+            MD5(
+                COALESCE(v.name, '') || '|' ||
+                COALESCE(v.release_date::text, '0') || '|' ||
+                COALESCE(v.country_list::text, '{}') || '|' ||
+                COALESCE(v.style_list::text, '{}') || '|' ||
+                COALESCE(v.score::text, '0') || '|' ||
+                COALESCE(v.introduction, '') || '|' ||
+                COALESCE(v.poster_path, '') || '|' ||
+                COALESCE(v.backdrop_path, '') || '|' ||
+                COALESCE(v.logo_path, '')
+            ) AS content_hash
         FROM file_info f
         LEFT JOIN ug_video_info v ON f.category_id = v.category_id
+        LEFT JOIN (
+            SELECT category_id, MAX(last_access_time) AS max_play
+            FROM play_history GROUP BY category_id
+        ) ph ON ph.category_id = f.category_id
+        LEFT JOIN (
+            SELECT once_id, MAX(create_time) AS max_fav
+            FROM favorites GROUP BY once_id
+        ) fv ON fv.once_id = f.category_id
+        LEFT JOIN ug_collection c ON c.collection_id = v.collection_id
     """
     params = []
     if path_prefix:
@@ -172,12 +205,19 @@ def fetch_individual_episode(conn, category_id: str, season_num: int,
 
 _DB_DEFAULTS: dict[str, int | str | float | list] = {
     "ug_video_info_id": 0, "category_id": "", "name": "",
+    "pinyin_first": "", "pinyin_full": "", "to9_digit": "",
     "douban_id": 0, "tmdb_id": 0,
     "score": 0.0, "year": 0, "season": 0,
     "introduction": "", "country_list": [], "style_list": [],
-    "grading": 0, "release_date": 0,
+    "grading": 0, "release_date": 0, "last_release_date": 0,
     "all_season_episode_num": 0,
-    "collection_id": "", "media_lib_set_id": 0, "ctime": 0, "utime": 0,
+    "type": 0,
+    "poster_path": "", "backdrop_path": "", "logo_path": "",
+    "tagline": "", "no_lang_poster_path": "", "no_lang_backdrop_path": "",
+    "language": "", "old_category_id": "", "collection_id": "",
+    "collection_time": 0, "media_lib_set_id": 0,
+    "last_play_file_path": "", "jp_name": "", "ug_media_id": "",
+    "ctime": 0, "utime": 0,
 }
 
 
@@ -189,7 +229,7 @@ def _default(key: str):
 def _default_file(key: str):
     """file_info 字段的默认值"""
     str_fields = {"file_name", "file_path", "folder_path", "category_id",
-                  "video_name"}
+                  "video_name", "content_hash"}
     if key in str_fields:
         return ""
     return 0

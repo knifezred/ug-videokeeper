@@ -18,17 +18,38 @@
 
 ### 实现方式
 
-项目在每部视频目录下自动维护一个隐藏文件 `.ugreen.json`（绿联 NAS 默认不显示 `.` 开头的文件），全量备份标题、年份、简介、评分、播放记录、收藏、合集、剧集列表等数据。当数据库被刮削重置后，从这些备份文件中恢复全部数据。
+项目在每部视频目录下自动维护一个隐藏文件 `.ugreen.json`（绿联 NAS 默认不显示 `.` 开头的文件），全量备份 `ug_video_info` 全部字段 + 播放记录 + 收藏 + 合集 + 剧集列表。当数据库被刮削重置后，从这些备份文件中恢复全部数据。
 
-**项目从不写入、不修改、不创建任何 NFO 文件。** NFO 文件完全由绿联系统或用户自己管理。
+**项目不写入、不修改、不依赖任何 NFO 文件。** 数据流转完全基于 `.ugreen.json`。
+
+### 数据流
+
+```
+绿联重刮
+  → 检测 category_id 变化或 ctime 增大
+  → 从 .ugreen.json 恢复 35 个字段到 DB
+
+用户播放/收藏/编辑合集
+  → 检测 max_mtime（5 张表最新时间戳）增大
+  → 从 DB 备份到 .ugreen.json
+
+用户编辑视频元数据（utime 不变）
+  → 检测 9 个关键字段的 MD5 哈希变化
+  → 从 DB 备份到 .ugreen.json
+
+手动编辑 movie.nfo
+  → Watchdog 检测到变化
+  → 合并 NFO 的 7 个字段到 .ugreen.json
+  → 恢复合并后的 .ugreen.json 到 DB
+```
 
 ### 核心功能
 
 | 功能 | 说明 |
 |------|------|
 | 定时周期同步 | 每隔指定时间（默认 1 小时）检查数据库是否有变化，自动备份或恢复 |
-| Watchdog 实时监控 | 检测到 NFO 文件被手动编辑后，立即将新内容写回数据库，无需等待周期同步 |
-| 数据闭环 | 用户编辑 NFO 的时间会被记录下来，下次周期同步时写入 `.ugreen.json`，以后每次都以此时间为准 |
+| Watchdog 实时监控 | 检测到 NFO 文件被手动编辑后，合并 NFO 字段到 `.ugreen.json`，写回数据库 |
+| 播放记录完整历史 | `.ugreen.json` 保存全部播放记录，新旧合并去重，不丢历史 |
 | 安全写入 | `DRY_RUN` 模式可预览操作，不实际写入数据库 |
 
 ---
@@ -49,30 +70,30 @@
 
 你打开 `movie.nfo`，把标题改成自己喜欢的名字，保存。
 
-**Watchdog 会自动检测到变化，把新标题写回数据库。** 你不需要手动触发同步。
+**Watchdog 合并 NFO 到 `.ugreen.json`，写入 DB。** 周期同步也保护这个值。
 
 ### 场景 3：你把视频文件夹移到了新硬盘
 
 从 `/volume1/media/电影/肖申克的救赎` 移到 `/volume2/media/电影/肖申克的救赎`。
 
-绿联重新扫描后，播放记录、收藏、合集全部自动恢复。**零手动操作。**
+绿联重新扫描后，`category_id` 会变。程序从 `file_info` 获取最新 `category_id`，`.ugreen.json` 跟着目录走，播放记录通过哈希匹配，全部恢复。
 
 ### 场景 4：你重命名了视频文件
 
 `Inception_4K.mkv` → `盗梦空间 4K.mkv`
 
-播放记录不会丢失。项目基于文件内容哈希匹配文件，改名不影响匹配。
+播放记录基于文件内容哈希匹配文件，改名不影响匹配。
 
 ### 数据保护范围
 
 | 你的操作 | 保护方式 |
 |---------|---------|
-| 在影视中心编辑标题/简介/评分 | 下次同步备份到 `.ugreen.json`，刮削后恢复 |
-| 观看视频（播放进度） | 备份到 `.ugreen.json`，基于文件内容哈希匹配，防错位 |
-| 标记收藏 | 备份到 `.ugreen.json` |
-| 编辑合集 | 完整 19 个字段全部备份 |
-| 手动编辑 `movie.nfo` | Watchdog 检测到变化 → 立即写回数据库 |
-| 移动文件夹到新路径 | `.ugreen.json` 跟着走，自动解析新路径 |
+| 在影视中心编辑标题/简介/评分 | content_hash 检测变化 → DB→JSON 备份 |
+| 观看视频（播放进度） | max_mtime 检测变化 → DB→JSON 备份，保存完整历史 |
+| 标记收藏 | max_mtime 检测 → 直接覆盖 JSON |
+| 编辑合集 | max_mtime 检测 → 直接覆盖 JSON |
+| 手动编辑 `movie.nfo` | Watchdog 合并到 JSON → 写回 DB |
+| 移动文件夹到新路径 | 从 file_info 获取最新 category_id 恢复 |
 | 重命名文件 | 内容哈希不变，播放记录不丢失 |
 | 删除 `.ugreen.json` | 下次周期同步时从数据库自动重建 |
 
@@ -88,8 +109,6 @@
 
 ### 配置项
 
-通过环境变量配置：
-
 | 环境变量 | 必填 | 默认值 | 说明 |
 |---------|:---:|--------|------|
 | `DB_HOST` | ✅ | - | PostgreSQL 主机地址 |
@@ -97,7 +116,7 @@
 | `DB_NAME` | | `video` | 数据库名 |
 | `DB_USER` | | `postgres` | 数据库用户 |
 | `DB_PASSWORD` | | `""` | 数据库密码 |
-| `MEDIA_LIB_PATHS` | | - | Watchdog 监控的媒体目录（多个用 `:` 分隔） |
+| `MEDIA_LIB_PATHS` | | `""` | Watchdog 监控的媒体目录（多个用 `:` 分隔） |
 | `WATCHDOG_ENABLED` | | `true` | 启用 NFO 文件实时监控 |
 | `WATCHDOG_DEBOUNCE` | | `3.0` | 文件防抖秒数 |
 | `SCAN_INTERVAL` | | `3600` | 周期同步间隔（秒），`0` 表示仅运行一次后进入纯 Watchdog 模式 |
@@ -105,22 +124,7 @@
 | `TARGET_PATH` | | 空 | 限定同步路径范围，仅处理该路径前缀下的视频。用于小范围测试 |
 | `LOG_LEVEL` | | `INFO` | 日志级别：`DEBUG` / `INFO` / `WARNING` / `ERROR` |
 
-### Docker 部署
-
-**快速启动：**
-
-```bash
-docker run -d \
-  --name ug-videokeeper \
-  --restart unless-stopped \
-  -e DB_HOST=127.0.0.1 \
-  -v /你的绿联媒体目录:/你的绿联媒体目录 \
-  -v ./app:/app \
-  python:3.11-slim \
-  sh -c "pip install psycopg2-binary schedule watchdog && python /app/main.py"
-```
-
-**Docker Compose：**
+### Docker Compose
 
 ```yaml
 version: "3.8"
@@ -139,49 +143,28 @@ services:
       - LOG_LEVEL=INFO
       - WATCHDOG_ENABLED=true
       - WATCHDOG_DEBOUNCE=3.0
-      # 可选：小范围测试
-      # - TARGET_PATH=/volume1/media/movie
-      # - DRY_RUN=true
+      - MEDIA_LIB_PATHS=/volume4/disk4/library:/volume3/云盘下载
     volumes:
-      - /你的绿联媒体目录:/你的绿联媒体目录
+      - /volume4/disk4/library:/volume4/disk4/library
+      - /volume3/云盘下载:/volume3/云盘下载
       - ./app:/app
     working_dir: /app
     command: sh -c "pip install -r requirements.txt && python main.py"
-```
-
-```bash
-docker-compose up -d
-docker-compose logs -f ug-videokeeper
 ```
 
 ### 首次运行建议
 
 1. 先用 `DRY_RUN=true` 跑一次，查看日志确认程序能正常连接数据库、识别视频文件
 2. 确认无误后关闭 `DRY_RUN`，正式运行
-3. 首次同步会完成两件事：为每部视频创建 `.ugreen.json` 备份文件；建立本地缓存避免重复工作
-4. 之后每次周期同步只检查有变化的记录，效率很高
-
-### 调试
-
-```bash
-# 查看实时日志
-docker logs -f ug-videokeeper
-
-# 试运行（不写入数据库）
-docker run --rm -e DB_HOST=... -e DRY_RUN=true ...
-
-# 单次同步后退出
-docker run --rm -e DB_HOST=... -e SCAN_INTERVAL=0 ...
-
-# 仅处理指定路径下的视频
-docker run --rm -e DB_HOST=... -e TARGET_PATH=/volume1/media/movie ...
-```
+3. 首次同步会为每部视频创建 `.ugreen.json` 备份文件，建立本地缓存
+4. 之后每次周期同步只检查有变化的记录
 
 ### 目录结构
 
 ```
 ug-videokeeper/
-├── main.py                    # 入口：启动调度器
+├── main.py                    # 入口
+├── checks.py                  # 启动自检
 ├── config.py                  # 配置解析
 ├── models.py                  # 数据模型
 ├── utils.py                   # 工具函数
@@ -189,6 +172,7 @@ ug-videokeeper/
 ├── state.py                   # 状态缓存
 ├── watcher.py                 # Watchdog 实时监控
 ├── db/
+│   ├── connection.py          # 数据库连接
 │   ├── queries.py             # 数据库查询
 │   └── sync.py                # 数据库写入
 ├── nfo/
@@ -205,28 +189,33 @@ ug-videokeeper/
 ### FAQ
 
 **Q: 为什么用 `python:3.11-slim` 而不是自建镜像？**
-A: 依赖只有三个包（`psycopg2-binary`、`schedule`、`watchdog`），启动时 pip 安装即可，无需维护镜像。
+A: 依赖只有三个包（`psycopg2-binary`、`schedule`、`watchdog`），启动时 pip 安装即可。
 
 **Q: `.ugreen.json` 和 NFO 文件是什么关系？**
-A: 互不干扰。项目**不写入 NFO**，所有扩展数据存到 `.ugreen.json`（隐藏文件）。NFO 仅用于 Watchdog 监控——你手动编辑 NFO 时，Watchdog 读取新值写回数据库。
+A: 互不干扰。项目**不写入 NFO**，全部数据存到 `.ugreen.json`。Watchdog 监控 NFO 变化时，将 NFO 编辑的字段合并到 `.ugreen.json`，再写回数据库。
 
 **Q: 每次运行都会读所有文件吗？**
-A: 不会。首次运行建立基线后，后续只对比时间戳，无变化则直接跳过。
+A: 不会。首次运行建立基线后，后续通过缓存对比时间戳和内容哈希，无变化则跳过。
 
 **Q: 播放记录回写时如何找到正确的文件？**
-A: 三级匹配：1) 文件内容哈希（改名/移动目录后仍可匹配）；2) strm 文件自行计算内容哈希；3) 文件名前缀匹配。匹配失败的记录跳过并告警。
+A: 三级匹配：1) 文件内容哈希（改名/移动后仍可匹配）；2) strm 文件自行计算哈希；3) 文件名前缀匹配。
+
+**Q: 播放记录会丢历史吗？**
+A: 不会。`.ugreen.json` 保存完整播放历史，DB 只保留最新一条。每次同步合并新旧记录并去重。
 
 **Q: 电视剧的数据写在什么地方？**
-A: 电视剧根目录的 `.ugreen.json`。包含剧集列表、播放记录、收藏、合集。恢复时按哈希匹配逐条定位到具体文件。
+A: 电视剧目录的 `.ugreen.json`，`video_type == 2`。包含 `ug_video_info` 全字段 + 剧集列表 + 播放记录 + 收藏 + 合集。
 
 **Q: 移动目录后数据会丢吗？**
-A: 不会。`.ugreen.json` 跟视频目录一起移动，项目通过目录路径自动解析新 `category_id`，播放记录通过内容哈希匹配，移动不影响。
+A: 不会。`.ugreen.json` 跟着目录走，程序从 `file_info` 获取最新 `category_id`，播放记录通过哈希匹配恢复。
+
+**Q: 手动编辑 ug_video_info（如改名字）utime 不变怎么办？**
+A: 程序对 9 个用户可编辑字段计算 MD5 哈希，哈希变化即触发 DB→JSON 同步。
 
 **Q: `DRY_RUN` 模式做什么？**
-A: 扫描文件、比对数据、输出日志，但**不执行任何数据库写入**。用于验证配置和预览操作。
+A: 扫描文件、比对数据、输出日志，但**不执行任何数据库写入**。
 
 ## 致谢
 
-- 感谢 [WorkBuddy](https://www.codebuddy.cn/work/) 提供免费算力额度，为本项目完整开发、功能调试提供支持。
-- 感谢 [wa3ytsm](https://club.ugnas.com/home.php?mod=space&uid=3326&do=thread&view=me&from=space) 对本项目的启发和指导。
-
+- 感谢 [WorkBuddy](https://www.codebuddy.cn/work/) 提供免费算力额度
+- 感谢 [wa3ytsm](https://club.ugnas.com/home.php?mod=space&uid=3326&do=thread&view=me&from=space) 对本项目的启发和指导
