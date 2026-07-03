@@ -195,6 +195,7 @@ class SyncResult:
     direction: str = ""          # "nfo_to_db" | "db_to_nfo" | "skip" | "error"
     scene: str = ""              # "1"|"2"|"3.1"|"3.2"|"3.3" 等
     message: str = ""
+    synced: bool = True          # False = 未实际执行同步，调用方跳过写缓存
 
 
 @dataclass

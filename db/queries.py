@@ -254,13 +254,11 @@ def _build_video_fields(nfo: NfoRecord) -> dict:
     return fields
 
 
-def sync_nfo_to_db(conn, nfo: NfoRecord, sync_utime: bool = False) -> int:
+def sync_nfo_to_db(conn, nfo: NfoRecord) -> int:
     """NFO → 数据库 完整回写（视频元数据 + 演员 + 播放记录 + 收藏 + 合集）。
     供 executor 和 watcher 共用，返回 ug_video_info_id。
-    sync_utime=True 时将 NFO 文件 mtime 写入 DB.utime（规则 3.1b 手动编辑 NFO）。
+    upsert_video_info 后始终将 NFO 的 utime 写回 DB（保留用户修改时间戳）。
     """
-    import os as _os
-
     # 先解析最新 category_id（目录移动后 NFO 里的值已过期）
     resolved_cat = _resolve_category_id(conn, nfo.video_dir,
                                         os.path.basename(nfo.nfo_path))
@@ -268,14 +266,15 @@ def sync_nfo_to_db(conn, nfo: NfoRecord, sync_utime: bool = False) -> int:
         nfo.ugreen.category_id = resolved_cat
 
     vid = upsert_video_info(conn, nfo)
-    if sync_utime:
-        mtime = int(_os.path.getmtime(nfo.nfo_path))
+    # 恢复 utime（保留 NFO 中的值，避免刮削覆盖）
+    if nfo.ugreen.utime:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE ug_video_info SET utime = %s WHERE category_id = %s",
-                (mtime, nfo.ugreen.category_id),
+                (nfo.ugreen.utime, nfo.ugreen.category_id),
             )
-        log.debug("sync_utime: cat=%s utime=%d", nfo.ugreen.category_id, mtime)
+        log.debug("sync_nfo_to_db: 恢复 utime=%d cat=%s",
+                  nfo.ugreen.utime, nfo.ugreen.category_id)
 
     if nfo.ugreen.play_history:
         log.debug("sync_nfo_to_db: 写入 %d 条播放记录",
@@ -798,8 +797,11 @@ def build_tv_season_from_db(conn, category_id: str, folder: str) -> Optional[TvS
             year=col.get("year", 0),
             score=float(col.get("score", 0) or 0),
             category_id_list=[str(c) for c in cats] if cats else [],
+            src_type=col.get("src_type", 0),
             jp_name=col.get("jp_name", ""),
             cloud_id=col.get("cloud_id", ""),
+            ctime=col.get("ctime", 0),
+            utime=col.get("utime", 0),
         )
 
     return s
@@ -843,13 +845,7 @@ def sync_tv_nfo_to_db(conn, season: TvSeasonRecord, folder: str):
 
     # 更新每集
     for ep in season.episodes:
-        # 按 season+episode 在当前 folder 的 file_info 中匹配
-        matched_fi = None
-        for fi in current_files:
-            # 需要从 file_info 查 episode_num — 但 current_files 没包含
-            # 扩展查询
-            pass
-        # 简化为直接按 ug_television_episode_id 更新
+        # 按 ug_television_episode_id 直接更新
         if ep.ug_television_episode_id:
             with conn.cursor() as cur:
                 cur.execute(

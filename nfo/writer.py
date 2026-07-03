@@ -337,6 +337,27 @@ def _patch_nfo(nfo: NfoRecord):
         raise
 
     try:
+        # 多值官方字段：genre / country / mpaa / actor
+        _remove_child(root, "genre")
+        for g in o.genre:
+            _set_dom_text(dom, root, "genre", g)
+        _remove_child(root, "country")
+        for c in o.country:
+            _set_dom_text(dom, root, "country", c)
+        _set_dom_text(dom, root, "mpaa", o.mpaa)
+        _remove_child(root, "actor")
+        for a in o.actors:
+            a_el = dom.createElement("actor")
+            _set_dom_text(dom, a_el, "name", a.name)
+            _set_dom_text(dom, a_el, "role", a.role)
+            if a.tmdbid:
+                _dom_sub(dom, a_el, "tmdbid", str(a.tmdbid))
+            root.appendChild(a_el)
+    except Exception:
+        log.error("_patch_nfo: 多值字段写入失败 nfo=%s", nfo_path)
+        raise
+
+    try:
         _replace_dom_element(root, "ugreen", _build_ugreen_dom(nfo, dom))
     except Exception:
         log.error("_patch_nfo: ugreen 写入失败 nfo=%s cat=%r vid=%r",

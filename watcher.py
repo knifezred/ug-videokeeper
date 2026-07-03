@@ -127,13 +127,22 @@ class Watcher:
 
                 log.info("Watchdog: NFO→DB %s cat=%s name=%s",
                          os.path.basename(nfo_path), cat, db_rec.name)
-                queries.sync_nfo_to_db(conn, nfo, sync_utime=True)
+                queries.sync_nfo_to_db(conn, nfo)
                 conn.commit()
 
-                new_utime = int(os.path.getmtime(nfo_path))
-                st.update_cache(cat, db_rec.ctime, new_utime, cache)
+                # sync_nfo_to_db 内部通过 _resolve_category_id 更新了 category_id
+                resolved_cat = nfo.ugreen.category_id
+                new_utime = nfo.ugreen.utime
+                # 用 resolved_cat 重新查 DB 最新时间戳写入缓存
+                fresh = queries.fetch_video_by_category(conn, resolved_cat)
+                if fresh:
+                    st.update_cache(resolved_cat, fresh.ctime, new_utime, cache,
+                                    db_vid=fresh.ug_video_info_id)
+                else:
+                    st.update_cache(resolved_cat, 0, new_utime, cache)
                 st.save(cache)
-                log.info("Watchdog: 完成 %s (cache utime=%d)", os.path.basename(nfo_path), new_utime)
+                log.info("Watchdog: 完成 %s (cat=%s cache utime=%d)",
+                         os.path.basename(nfo_path), resolved_cat, new_utime)
             except Exception:
                 conn.rollback()
                 log.error("Watchdog: DB 操作失败 %s", nfo_path, exc_info=True)

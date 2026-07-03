@@ -50,26 +50,28 @@ def decide_first_sync(nfo: NfoRecord | None, db_ctime: int) -> SyncResult:
 
 
 def decide_from_cache(db_ctime: int, db_utime: int,
-                       cache_ctime: int, cache_utime: int) -> SyncResult:
+                       cache_ctime: int, cache_utime: int,
+                       db_vid: int = 0, cache_vid: int = 0) -> SyncResult:
     """
     cache 存在时的决策（不读 NFO，仅对比 DB 与缓存）。
 
     规则:
-      cache.1: DB.ctime > cache.ctime → "nfo_to_db"  (重新刮削)
-      cache.2: ctime 一致、DB.utime > cache.utime → "db_to_nfo"  (用户编辑)
+      cache.1: DB.ctime > cache.ctime 或 DB.vid != cache.vid → "nfo_to_db"
+      cache.2: ctime+vid 一致、DB.utime > cache.utime → "db_to_nfo"
       cache.3: 时间一致 → "skip"
     """
     result = SyncResult()
 
-    if db_ctime > cache_ctime:
+    if db_ctime > cache_ctime or (db_vid and cache_vid and db_vid != cache_vid):
         result.direction = "nfo_to_db"
         result.scene = "cache.1"
+        cause = "db_ctime 增大" if db_ctime > cache_ctime else "vid 变化"
         result.message = (
-            f"DB 被重新刮削 (db_ctime={db_ctime} > cache_ctime={cache_ctime})，"
+            f"DB 被重新刮削 ({cause}: db_ctime={db_ctime} > {cache_ctime}"
+            f"{', vid=' + str(db_vid) + ' != ' + str(cache_vid) if db_vid != cache_vid else ''})，"
             f"从 NFO 回写数据库"
         )
-        log.debug("策略决策 cache.1: db_ctime=%d > cache_ctime=%d → NFO→DB",
-                  db_ctime, cache_ctime)
+        log.debug("策略决策 cache.1: %s → NFO→DB", cause)
         return result
 
     if db_ctime == cache_ctime and db_utime > cache_utime:

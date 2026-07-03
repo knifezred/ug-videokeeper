@@ -37,9 +37,10 @@ def save(state: dict):
 
 
 def update_cache(category_id: str, db_ctime: int, db_utime: int,
-                  cache: dict):
+                  cache: dict, db_vid: int = 0):
     """同步完成后更新缓存"""
     cache[category_id] = {
         "db_ctime": db_ctime,
         "db_utime": db_utime,
+        "db_vid": db_vid,
     }

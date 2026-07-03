@@ -54,6 +54,8 @@ def run_sync() -> list[SyncResult]:
                     fr.video_ctime, fr.video_utime,
                     cached_entry.get("db_ctime", 0),
                     cached_entry.get("db_utime", 0),
+                    db_vid=fr.ug_video_info_id,
+                    cache_vid=cached_entry.get("db_vid", 0),
                 )
                 if decision.direction == "skip":
                     stats["cached"] += 1
@@ -69,7 +71,7 @@ def run_sync() -> list[SyncResult]:
                 log.info("  → 结果: direction=%s scene=%s", result.direction, result.scene)
 
                 st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime,
-                                cache)
+                                cache, db_vid=fr.ug_video_info_id)
                 continue
 
             # ===== 路径 B: cache 不存在 → 读 NFO 首次决策 =====
@@ -81,11 +83,12 @@ def run_sync() -> list[SyncResult]:
             result = _exec_first_sync(conn, fr, folder, nfo, nfo_path, decision)
             results.append(result)
             stats[result.direction] = stats.get(result.direction, 0) + 1
-            log.info("  → 结果: direction=%s scene=%s path=%s",
-                     result.direction, result.scene, result.nfo_path)
+            log.info("  → 结果: direction=%s scene=%s synced=%s path=%s",
+                     result.direction, result.scene, result.synced, result.nfo_path)
 
-            st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime,
-                            cache)
+            if result.synced:
+                st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime,
+                                cache, db_vid=fr.ug_video_info_id)
 
         if not DRY_RUN:
             conn.commit()
@@ -169,6 +172,7 @@ def _exec_first_sync(conn, fr: FileRecord, folder: str, nfo: NfoRecord | None,
         else:
             log.warning("首次同步 scene=2 但 DB 无记录: category_id=%s folder=%s",
                         fr.category_id, folder)
+            decision.synced = False
         return decision
 
     if decision.scene == "3":  # NFO ctime < DB ctime → NFO→DB
@@ -240,6 +244,8 @@ def _process_tv(conn, fr: FileRecord, folder: str, nfo_path: str,
             fr.video_ctime, fr.video_utime,
             cached_entry.get("db_ctime", 0),
             cached_entry.get("db_utime", 0),
+            db_vid=fr.ug_video_info_id,
+            cache_vid=cached_entry.get("db_vid", 0),
         )
         if decision.direction == "skip":
             stats["cached"] += 1
@@ -259,7 +265,8 @@ def _process_tv(conn, fr: FileRecord, folder: str, nfo_path: str,
             if season:
                 write_tv_nfo(season, nfo_path)
                 stats["db_to_nfo"] = stats.get("db_to_nfo", 0) + 1
-        st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime, cache)
+        st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime, cache,
+                        db_vid=fr.ug_video_info_id)
         return
 
     # cache 不存在 → 首次同步
@@ -274,7 +281,8 @@ def _process_tv(conn, fr: FileRecord, folder: str, nfo_path: str,
         if season:
             write_tv_nfo(season, nfo_path)
             stats["db_to_nfo"] = stats.get("db_to_nfo", 0) + 1
-    st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime, cache)
+    st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime, cache,
+                    db_vid=fr.ug_video_info_id)
 
 
 def _db_to_nfo(conn, nfo: NfoRecord, db_record):
