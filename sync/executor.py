@@ -1,12 +1,15 @@
 """同步执行器 — 遍历 file_info 表，cache 不存在/存在两种决策路径"""
 import os
 from config import log, DRY_RUN, TARGET_PATH
-from db import queries
+from db import queries, sync as db_sync
 from db.connection import connect
-from nfo.reader import read_nfo, find_nfo_in_dir
-from nfo.writer import write_nfo, write_nfo_from_db
+from nfo import ugreen
+from nfo.reader import read_nfo
+from nfo.writer import write_ugreen_from_db
 from sync.strategy import decide_first_sync, decide_from_cache
-from models import NfoRecord, VideoMeta, UgreenMeta, SyncResult, FileRecord
+from models import NfoRecord, VideoMeta, SyncResult, FileRecord
+from models import UgreenRecord, PlayHistory, Favorite, Collection
+from utils import compute_file_hash
 import state as st
 
 
@@ -14,7 +17,7 @@ def run_sync() -> list[SyncResult]:
     conn = connect()
     results: list[SyncResult] = []
     processed_dirs: set[tuple] = set()
-    stats = {"nfo_to_db": 0, "db_to_nfo": 0, "skip": 0, "error": 0, "cached": 0}
+    stats = {"nfo_to_db": 0, "db_to_json": 0, "skip": 0, "error": 0, "cached": 0}
 
     cache = st.load()
     log.info("状态缓存已加载: %d 条", len(cache))
@@ -27,28 +30,21 @@ def run_sync() -> list[SyncResult]:
         for fr in file_records:
             folder = fr.folder_path
             if not folder or not os.path.isdir(folder):
-                log.debug("跳过不存在的目录: %s", folder)
                 continue
 
             dir_key = _dir_key(folder, fr.season_num, fr.file_name)
             if dir_key in processed_dirs:
-                log.debug("跳过已处理目录: %s (key=%s)", folder, dir_key)
                 continue
             processed_dirs.add(dir_key)
 
-            # 电视剧：统一用 ugreen_tv.nfo 处理
+            # 电视剧：通过 .ugreen.json 处理
             if fr.video_type == 2:
-                tv_nfo_path = os.path.join(folder, "ugreen_tv.nfo")
-                _process_tv(conn, fr, folder, tv_nfo_path, cache, results, stats)
+                _process_tv(conn, fr, folder, cache, results, stats)
                 continue
 
             cached_entry = cache.get(fr.category_id)
 
-            log.debug("处理: cat=%s name=%s folder=%s cache=%s",
-                      fr.category_id, fr.video_name, folder,
-                      "hit" if cached_entry else "miss")
-
-            # ===== 路径 A: cache 存在 → 纯 DB vs cache 比较 =====
+            # ===== 路径 A: cache 存在 =====
             if cached_entry is not None:
                 decision = decide_from_cache(
                     fr.video_ctime, fr.video_utime,
@@ -59,36 +55,30 @@ def run_sync() -> list[SyncResult]:
                 )
                 if decision.direction == "skip":
                     stats["cached"] += 1
-                    log.debug("  → %s %s", decision.scene, decision.message)
                     continue
 
                 log.info("  → %s %s", decision.scene, decision.message)
-                # cache.1 或 cache.2 → 执行同步
                 nfo_path = _find_nfo_for_record(fr)
                 result = _exec_cached(conn, fr, folder, nfo_path, decision)
                 results.append(result)
                 stats[result.direction] = stats.get(result.direction, 0) + 1
-                log.info("  → 结果: direction=%s scene=%s", result.direction, result.scene)
 
-                st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime,
-                                cache, db_vid=fr.ug_video_info_id)
+                _update_cache(cache, fr)
                 continue
 
-            # ===== 路径 B: cache 不存在 → 读 NFO 首次决策 =====
-            nfo_path = _find_nfo_for_record(fr)
-            nfo = read_nfo(nfo_path) if nfo_path else None
-
-            decision = decide_first_sync(nfo, fr.video_ctime)
+            # ===== 路径 B: cache 不存在 → 首次决策 =====
+            json_record = ugreen.read_ugreen(folder)
+            json_ctime = json_record.ctime if json_record else 0
+            decision = decide_first_sync(json_ctime, fr.video_ctime)
             log.info("  → %s %s", decision.scene, decision.message)
-            result = _exec_first_sync(conn, fr, folder, nfo, nfo_path, decision)
+            result = _exec_first_sync(conn, fr, folder, json_record, decision)
             results.append(result)
             stats[result.direction] = stats.get(result.direction, 0) + 1
-            log.info("  → 结果: direction=%s scene=%s synced=%s path=%s",
-                     result.direction, result.scene, result.synced, result.nfo_path)
+            log.info("  → 结果: direction=%s scene=%s synced=%s",
+                     result.direction, result.scene, result.synced)
 
             if result.synced:
-                st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime,
-                                cache, db_vid=fr.ug_video_info_id)
+                _update_cache(cache, fr)
 
         if not DRY_RUN:
             conn.commit()
@@ -107,136 +97,73 @@ def run_sync() -> list[SyncResult]:
     return results
 
 
+# ---- 路径 A 执行 ----
+
 def _exec_cached(conn, fr: FileRecord, folder: str, nfo_path: str | None,
                  decision: SyncResult) -> SyncResult:
-    """cache 存在时的同步执行：cache.1 = NFO→DB / cache.2 = DB→NFO"""
+    """cache 存在时的执行：cache.1 = NFO/JSON→DB / cache.2 = DB→JSON"""
     decision.nfo_path = nfo_path or ""
 
-    if decision.scene == "cache.1":  # 重新刮削 → NFO→DB
-        if nfo_path is None:
-            log.warning("cache.1: 需 NFO→DB 但本地无 NFO, cat=%s folder=%s",
-                        fr.category_id, folder)
-            return SyncResult(nfo_path="", direction="error", scene="cache.1",
-                              message="需 NFO→DB 但本地无 NFO")
-        nfo = read_nfo(nfo_path)
+    if decision.scene == "cache.1":  # 刮削 → 从 NFO + JSON 恢复 DB
+        nfo = read_nfo(nfo_path) if nfo_path else None
         if nfo is None:
-            log.warning("cache.1: NFO 解析失败 %s", nfo_path)
-            return SyncResult(nfo_path=nfo_path, direction="error", scene="cache.1",
-                              message="NFO 解析失败")
-        log.debug("cache.1: 执行 NFO→DB, nfo=%s actors=%d play_history=%d",
-                  nfo_path, len(nfo.official.actors), len(nfo.ugreen.play_history))
-        queries.sync_nfo_to_db(conn, nfo)
-        log.info("cache.1: NFO→DB 完成, cat=%s", fr.category_id)
+            nfo = NfoRecord(video_dir=folder, official=VideoMeta())
+            log.debug("cache.1: 无有效 NFO，仅从 .ugreen.json 恢复 cat=%s", fr.category_id)
+        db_sync.sync_nfo_to_db(conn, nfo)
+        log.info("cache.1: 恢复完成, cat=%s", fr.category_id)
         return decision
 
-    # cache.2: 用户编辑 → DB→NFO
-    if nfo_path is None:
-        log.debug("cache.2: NFO 不存在，从 DB 创建, cat=%s folder=%s",
-                  fr.category_id, folder)
-        _create_nfo_from_db(conn, fr, folder)
-        return decision
-
-    nfo = read_nfo(nfo_path)
-    if nfo is None:
-        log.warning("cache.2: NFO 解析失败 %s", nfo_path)
-        return SyncResult(nfo_path=nfo_path, direction="error", scene="cache.2",
-                          message="NFO 解析失败")
-    db_rec = queries.fetch_video_by_category(conn, fr.category_id)
-    if db_rec is None:
-        log.warning("cache.2: DB 无此记录, cat=%s", fr.category_id)
-        return SyncResult(nfo_path=nfo_path, direction="error", scene="cache.2",
-                          message="DB 无此记录")
-    log.debug("cache.2: 执行 DB→NFO, cat=%s name=%s", fr.category_id, db_rec.name)
-    _db_to_nfo(conn, nfo, db_rec)
-    log.info("cache.2: DB→NFO 完成 → %s", nfo_path)
+    # cache.2: 用户编辑 → DB → .ugreen.json
+    _write_ugreen_from_db(conn, fr.category_id, folder)
     return decision
 
 
-def _exec_first_sync(conn, fr: FileRecord, folder: str, nfo: NfoRecord | None,
-                     nfo_path: str | None, decision: SyncResult) -> SyncResult:
-    """cache 不存在时的首次同步执行"""
-    decision.nfo_path = nfo_path or os.path.join(folder, "movie.nfo")
+# ---- 路径 B 执行 ----
 
-    if decision.scene == "1":  # 无 NFO → 创建
-        log.debug("scene=1: 从 DB 创建 NFO, cat=%s folder=%s type=%s",
-                  fr.category_id, folder,
-                  "episode" if fr.season_num > 0 else ("tvshow" if fr.video_type == 2 else "movie"))
-        _create_nfo_from_db(conn, fr, folder)
+def _exec_first_sync(conn, fr: FileRecord, folder: str,
+                     json_record, decision: SyncResult) -> SyncResult:
+    """cache 不存在时的首次同步"""
+    decision.nfo_path = ""
+
+    if decision.scene == "first.1":  # json.ctime < db.ctime → 恢复
+        nfo_path = _find_nfo_for_record(fr)
+        nfo = read_nfo(nfo_path) if nfo_path else None
+        if nfo is None:
+            nfo = NfoRecord(video_dir=folder, official=VideoMeta())
+        log.debug("first.1: 恢复 DB, cat=%s", fr.category_id)
+        db_sync.sync_nfo_to_db(conn, nfo)
         return decision
 
-    if decision.scene == "2":  # 无 ugreen → DB→NFO
-        db_rec = queries.fetch_video_by_category(conn, fr.category_id)
-        if db_rec:
-            log.debug("scene=2: DB→NFO, cat=%s name=%s", fr.category_id, db_rec.name)
-            _db_to_nfo(conn, nfo, db_rec)
-        else:
-            log.warning("首次同步 scene=2 但 DB 无记录: category_id=%s folder=%s",
-                        fr.category_id, folder)
-            decision.synced = False
-        return decision
-
-    if decision.scene == "3":  # NFO ctime < DB ctime → NFO→DB
-        log.debug("scene=3: NFO→DB, cat=%s nfo=%s actors=%d",
-                  nfo.ugreen.category_id if nfo else "?", nfo_path,
-                  len(nfo.official.actors) if nfo else 0)
-        queries.sync_nfo_to_db(conn, nfo)
-        return decision
-
-    # scene == "4": DB→NFO 建立基线
-    db_rec = queries.fetch_video_by_category(conn, fr.category_id)
-    if db_rec:
-        log.debug("scene=4: DB→NFO 基线, cat=%s name=%s", fr.category_id, db_rec.name)
-        _db_to_nfo(conn, nfo, db_rec)
-    else:
-        log.warning("scene=4: DB 无记录, 回退 NFO→DB, cat=%s", fr.category_id)
-        queries.sync_nfo_to_db(conn, nfo)
+    # first.2 / first.3: DB → .ugreen.json（刷新或新建）
+    _write_ugreen_from_db(conn, fr.category_id, folder)
     return decision
 
 
-def _create_nfo_from_db(conn, fr: FileRecord, folder: str):
-    """创建 NFO 文件。若目录已有 NFO 则复用；否则按类型决定文件名。"""
-    existing = find_nfo_in_dir(folder)
-    if existing:
-        nfo_path = existing
-        # 从已有 NFO 读取 type，读不到默认 movie
-        existing_nfo = read_nfo(existing)
-        nfo_type = existing_nfo.nfo_type if existing_nfo else "movie"
-        log.debug("复用已有 NFO: %s (type=%s)", nfo_path, nfo_type)
-    else:
-        nfo_type, nfo_path = "movie", os.path.join(folder, "movie.nfo")
-        log.debug("创建新 NFO: type=%s path=%s cat=%s", nfo_type, nfo_path, fr.category_id)
+# ---- DB → .ugreen.json ----
 
-    nfo = NfoRecord(
-        nfo_type=nfo_type, nfo_path=nfo_path, video_dir=folder,
-        official=VideoMeta(),
-        ugreen=UgreenMeta(
-            category_id=fr.category_id,
-            ug_video_info_id=fr.ug_video_info_id,
-            media_lib_set_id=fr.media_lib_set_id,
-            ctime=fr.video_ctime,
-            utime=fr.video_utime,
-        ),
-    )
-    db_rec = queries.fetch_video_by_category(conn, fr.category_id)
+def _write_ugreen_from_db(conn, category_id: str, folder: str):
+    """查询 DB 全量数据并写入 .ugreen.json"""
+    db_rec = queries.fetch_video_by_category(conn, category_id)
     if db_rec is None:
-        log.debug("DB 无记录，写入空 NFO 骨架: %s", nfo_path)
-        write_nfo(nfo)
+        log.warning("DB→JSON: DB 无记录 cat=%s", category_id)
         return
-    log.debug("DB→NFO 写入: %s (name=%s)", nfo_path, db_rec.name)
-    _db_to_nfo(conn, nfo, db_rec)
+
+    db_actors = queries.fetch_actors(conn, category_id)
+    db_play = queries.fetch_play_history(conn, category_id)
+    db_fav = queries.fetch_favorites(conn, category_id)
+    db_col = queries.fetch_collection(conn, category_id)
+
+    log.debug("DB→JSON: cat=%s actors=%d play=%d fav=%d col=%s",
+              category_id, len(db_actors), len(db_play), len(db_fav),
+              db_col["name"] if db_col else "无")
+    write_ugreen_from_db(folder, db_rec, db_play, db_fav, db_col)
 
 
-def _ensure_season_nfo(conn, fr: FileRecord, folder: str):
-    pass  # 已废弃，由 _process_tv 统一处理
+# ---- 电视剧 ----
 
-
-
-def _process_tv(conn, fr: FileRecord, folder: str, nfo_path: str,
+def _process_tv(conn, fr: FileRecord, folder: str,
                 cache: dict, results: list, stats: dict):
-    """电视剧：读取/创建 ugreen_tv.nfo，cache 决策 + 同步"""
-    from nfo.reader import read_tv_nfo
-    from nfo.writer import write_tv_nfo
-
+    """电视剧：通过 .ugreen.json 同步"""
     cached_entry = cache.get(fr.category_id)
 
     if cached_entry is not None:
@@ -249,56 +176,143 @@ def _process_tv(conn, fr: FileRecord, folder: str, nfo_path: str,
         )
         if decision.direction == "skip":
             stats["cached"] += 1
-            log.debug("  → %s %s", decision.scene, decision.message)
             return
 
         log.info("  → %s %s (TV)", decision.scene, decision.message)
         if decision.scene == "cache.1":
-            season = read_tv_nfo(nfo_path)
-            if season:
-                queries.sync_tv_nfo_to_db(conn, season, folder)
+            ug = ugreen.read_ugreen(folder)
+            if ug:
+                _restore_tv_from_ugreen(conn, ug, folder)
                 stats["nfo_to_db"] = stats.get("nfo_to_db", 0) + 1
             else:
                 stats["error"] = stats.get("error", 0) + 1
         else:
-            season = queries.build_tv_season_from_db(conn, fr.category_id, folder)
-            if season:
-                write_tv_nfo(season, nfo_path)
-                stats["db_to_nfo"] = stats.get("db_to_nfo", 0) + 1
-        st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime, cache,
-                        db_vid=fr.ug_video_info_id)
+            _dump_tv_to_ugreen(conn, fr.category_id, folder)
+            stats["db_to_json"] = stats.get("db_to_json", 0) + 1
+        _update_cache(cache, fr)
         return
 
     # cache 不存在 → 首次同步
-    season = read_tv_nfo(nfo_path)
-    if season:
-        log.info("  → 首次同步 TV: ugreen_tv.nfo 已存在")
-        queries.sync_tv_nfo_to_db(conn, season, folder)
+    ug = ugreen.read_ugreen(folder)
+    if ug:
+        log.info("  → 首次同步 TV: .ugreen.json 存在 → 恢复")
+        _restore_tv_from_ugreen(conn, ug, folder)
         stats["nfo_to_db"] = stats.get("nfo_to_db", 0) + 1
     else:
-        log.info("  → 首次同步 TV: 从 DB 生成 ugreen_tv.nfo")
-        season = queries.build_tv_season_from_db(conn, fr.category_id, folder)
-        if season:
-            write_tv_nfo(season, nfo_path)
-            stats["db_to_nfo"] = stats.get("db_to_nfo", 0) + 1
-    st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime, cache,
-                    db_vid=fr.ug_video_info_id)
+        log.info("  → 首次同步 TV: 从 DB 生成 .ugreen.json")
+        _dump_tv_to_ugreen(conn, fr.category_id, folder)
+        stats["db_to_json"] = stats.get("db_to_json", 0) + 1
+    _update_cache(cache, fr)
 
 
-def _db_to_nfo(conn, nfo: NfoRecord, db_record):
-    cat = db_record.category_id or nfo.ugreen.category_id
-    log.debug("DB→NFO: 查询关联数据 cat=%s", cat)
-    db_actors = queries.fetch_actors(conn, cat)
-    db_play = queries.fetch_play_history(conn, cat)
-    db_fav = queries.fetch_favorites(conn, cat)
-    db_col = queries.fetch_collection(conn, cat)
-    # 补全 ugreen.category_id（NFO 可能无 <ugreen>）
-    if not nfo.ugreen.category_id:
-        nfo.ugreen.category_id = db_record.category_id
-    log.debug("DB→NFO: actors=%d play=%d fav=%d col=%s", len(db_actors),
-              len(db_play), len(db_fav), db_col["name"] if db_col else "无")
-    write_nfo_from_db(nfo, db_record, db_actors, db_play, db_fav, db_col)
+def _restore_tv_from_ugreen(conn, ug, folder: str):
+    """.ugreen.json → DB：写入官方字段 + 剧集 + 扩展数据"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE ug_video_info SET
+                 name = %s, year = %s, season = %s, introduction = %s,
+                 score = %s, douban_id = %s, tmdb_id = %s,
+                 release_date = %s, grading = %s, style_list = %s,
+                 all_season_episode_num = %s, media_lib_set_id = %s,
+                 ctime = %s, utime = %s
+               WHERE category_id = %s""",
+            (ug.name, ug.year, ug.season, ug.introduction,
+             ug.score, ug.douban_id, ug.tmdb_id,
+             ug.release_date, ug.grading, ug.style_list,
+             ug.all_season_episode_num, ug.media_lib_set_id,
+             ug.ctime, ug.utime, ug.category_id),
+        )
+    for ep in ug.episodes:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE ug_television_episode SET
+                     season = %s, episode = %s, name = %s,
+                     overview = %s, cover_path = %s, language = %s,
+                     episode_flag = %s, ctime = %s, utime = %s,
+                     media_lib_set_id = %s
+                   WHERE ug_television_episode_id = %s""",
+                (ep.get("season", 0), ep.get("episode", 0), ep.get("name", ""),
+                 ep.get("overview", ""), ep.get("cover_path", ""),
+                 ep.get("language", ""), ep.get("episode_flag", ""),
+                 ep.get("ctime", 0), ep.get("utime", 0),
+                 ep.get("media_lib_set_id", 0),
+                 ep.get("ug_television_episode_id", 0)),
+            )
+    if ug.play_history:
+        db_sync.upsert_play_history(conn, ug.play_history, folder, "")
+    if ug.favorites:
+        db_sync.upsert_favorites(conn, ug.category_id, ug.favorites)
+    if ug.collection and ug.collection.name:
+        db_sync.upsert_collection_for_video(conn, ug.category_id, ug.collection)
+    log.info("TV 恢复: cat=%s episodes=%d", ug.category_id, len(ug.episodes))
 
+
+def _dump_tv_to_ugreen(conn, category_id: str, folder: str):
+    """DB → .ugreen.json：电视剧全量写入"""
+    db_rec = queries.fetch_video_by_category(conn, category_id)
+    if db_rec is None:
+        return
+
+    eps = queries.fetch_episodes(conn, category_id)
+    phs = queries.fetch_play_history(conn, category_id)
+    favs = queries.fetch_favorites(conn, category_id)
+    col = queries.fetch_collection(conn, category_id)
+
+    ph_list = []
+    for ph in phs:
+        hash_fp = ph.get("hash_fingerprint", "") or ""
+        if not hash_fp:
+            fn, fp = ph.get("file_name", ""), ph.get("folder_path", "")
+            if fn and fp and fn.endswith(".strm") and os.path.isfile(os.path.join(fp, fn)):
+                try: hash_fp = compute_file_hash(os.path.join(fp, fn))
+                except OSError: pass
+        ph_list.append(PlayHistory(
+            uid=ph.get("uid", 0), category_id=ph.get("category_id", ""),
+            hash_fingerprint=hash_fp, progress=float(ph.get("progress", 0)),
+            current_play_time=ph.get("current_play_time", 0),
+            last_access_time=ph.get("last_access_time", 0),
+            watch_status=ph.get("watch_status", 1),
+            media_lib_set_id=ph.get("media_lib_set_id", 0),
+            create_time=ph.get("create_time", 0), iso_ts=ph.get("iso_ts", ""),
+        ))
+
+    fav_list = [Favorite(**{k: v for k, v in f.items()}) for f in favs]
+    col_obj = None
+    if col:
+        cats = col.get("category_id_list") or []
+        col_obj = Collection(
+            name=col.get("name", ""), collection_id=col.get("collection_id", ""),
+            tmdb_id=str(col.get("tmdb_id", "0") or "0"),
+            pinyin_first=col.get("pinyin_first", ""), pinyin_full=col.get("pinyin_full", ""),
+            poster_path=col.get("poster_path", ""), backdrop_path=col.get("backdrop_path", ""),
+            language=col.get("language", ""), introduction=col.get("introduction", ""),
+            is_manual_create=bool(col.get("is_manual_create")),
+            media_lib_set_id=col.get("media_lib_set_id", 0),
+            year=col.get("year", 0), score=float(col.get("score", 0) or 0),
+            category_id_list=[str(c) for c in cats] if cats else [],
+            src_type=col.get("src_type", 0), jp_name=col.get("jp_name", ""),
+            cloud_id=col.get("cloud_id", ""), ctime=col.get("ctime", 0), utime=col.get("utime", 0),
+        )
+
+    record = UgreenRecord(
+        type="tvshow", category_id=category_id,
+        ug_video_info_id=db_rec.ug_video_info_id,
+        media_lib_set_id=db_rec.media_lib_set_id,
+        ctime=db_rec.ctime, utime=db_rec.utime,
+        name=db_rec.name, year=db_rec.year,
+        introduction=db_rec.introduction, score=db_rec.score,
+        tmdb_id=db_rec.tmdb_id, douban_id=db_rec.douban_id,
+        style_list=db_rec.style_list or [], grading=db_rec.grading,
+        release_date=db_rec.release_date,
+        all_season_episode_num=db_rec.all_season_episode_num,
+        genre=db_rec.style_list or [], season=db_rec.season,
+        episodes=eps, play_history=ph_list,
+        favorites=fav_list, collection=col_obj,
+    )
+    ugreen.write_ugreen(folder, record)
+
+
+# ---- 辅助 ----
 
 def _dir_key(folder: str, season: int, file_name: str = "") -> tuple:
     if season and file_name:
@@ -307,38 +321,32 @@ def _dir_key(folder: str, season: int, file_name: str = "") -> tuple:
 
 
 def _find_nfo_for_record(fr: FileRecord) -> str | None:
-    """查找 FileRecord 对应的 NFO 文件，按类型优先级匹配。
-
-    电影 (video_type=1): movie.nfo → {文件名}.nfo → 目录下任一 .nfo
-    电视剧 (video_type=2): ugreen_tv.nfo → 目录下任一 .nfo
-    """
+    """查找 FileRecord 对应的 NFO 文件（仅用于读取官方字段）。"""
     folder = fr.folder_path
     file_nfo = os.path.splitext(fr.file_name)[0] + ".nfo"
-
     if fr.video_type == 1:
         candidates = ["movie.nfo", file_nfo]
     elif fr.video_type == 2:
-        candidates = ["ugreen_tv.nfo"]
+        return None  # 电视剧不用 NFO
     else:
         candidates = [file_nfo, "season.nfo", "tvshow.nfo"]
-
     for name in candidates:
         path = os.path.join(folder, name)
         if os.path.isfile(path):
-            log.debug("查找 NFO: 匹配 %s (type=%d season=%d)", name, fr.video_type, fr.season_num)
             return path
+    return None
 
-    # 兜底：目录下任一 .nfo（可能是不在上述候选列表中的命名）
-    any_nfo = find_nfo_in_dir(folder)
-    log.debug("查找 NFO: 兜底匹配 %s", any_nfo or "(无)")
-    return any_nfo
+
+def _update_cache(cache: dict, fr: FileRecord):
+    st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime,
+                    cache, db_vid=fr.ug_video_info_id)
 
 
 def _log_summary(stats: dict, total: int):
     log.info("======== 同步汇总 ========")
     log.info("  缓存跳过: %d", stats.get("cached", 0))
-    log.info("  NFO → DB: %d", stats.get("nfo_to_db", 0))
-    log.info("  DB → NFO: %d", stats.get("db_to_nfo", 0))
+    log.info("  NFO/JSON → DB: %d", stats.get("nfo_to_db", 0))
+    log.info("  DB → JSON: %d", stats.get("db_to_json", 0))
     log.info("  跳过:     %d", stats.get("skip", 0))
     if stats.get("error", 0):
         log.warning("  错误:     %d", stats.get("error", 0))

@@ -7,8 +7,9 @@ from watchdog.events import FileSystemEventHandler
 
 from config import log, WATCHDOG_DEBOUNCE
 from db.connection import connect
-from db import queries
+from db import queries, sync as db_sync
 from nfo.reader import read_nfo
+from nfo import ugreen
 import state as st
 
 
@@ -102,21 +103,32 @@ class Watcher:
             self._sync_one(nfo_path)
 
     def _sync_one(self, nfo_path: str):
-        """NFO 被编辑 → NFO→DB，仅处理 cache 中已有的 category_id"""
+        """.nfo 或 .ugreen.json 被编辑 → NFO→DB，仅处理 cache 中已有的 category_id"""
         try:
-            nfo = read_nfo(nfo_path)
-            if nfo is None:
-                log.warning("Watchdog: 解析失败 %s", nfo_path)
+            video_dir = os.path.dirname(nfo_path)
+
+            # 从 .ugreen.json 获取 category_id 和扩展数据
+            ug = ugreen.read_ugreen(video_dir)
+            if ug is None:
+                log.info("Watchdog: 无 .ugreen.json，跳过 %s (需先运行一次定时同步)", nfo_path)
                 return
-            cat = nfo.ugreen.category_id
+            cat = ug.category_id
             if not cat:
-                log.warning("Watchdog: 无 category_id，跳过 %s", nfo_path)
+                log.warning("Watchdog: .ugreen.json 无 category_id，跳过 %s", nfo_path)
                 return
 
             cache = st.load()
             if cat not in cache:
                 log.info("Watchdog: category_id=%s 不在缓存中，跳过 (需先运行一次定时同步建立缓存)", cat)
                 return
+
+            # 读取 NFO 官方字段（仅当事件源是 .nfo 时）
+            from models import NfoRecord, VideoMeta
+            nfo = read_nfo(nfo_path) if nfo_path.endswith(".nfo") else None
+            if nfo is None:
+                # NFO 可能损坏，但 .ugreen.json 还在 → 创建最小骨架用于同步
+                nfo = NfoRecord(nfo_path=nfo_path, video_dir=video_dir,
+                                official=VideoMeta())
 
             conn = connect()
             try:
@@ -126,23 +138,30 @@ class Watcher:
                     return
 
                 log.info("Watchdog: NFO→DB %s cat=%s name=%s",
-                         os.path.basename(nfo_path), cat, db_rec.name)
-                queries.sync_nfo_to_db(conn, nfo)
+                         os.path.basename(nfo_path), cat, db_rec.name if db_rec else "")
+
+                # 写入 DB：官方字段来自 NFO，扩展字段来自 .ugreen.json
+                db_sync.sync_nfo_to_db(conn, nfo)
+
+                # 用户编辑 NFO → 用文件 mtime 作为 utime
+                nfo_mtime = int(os.path.getmtime(nfo_path))
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE ug_video_info SET utime = %s WHERE category_id = %s",
+                        (nfo_mtime, cat),
+                    )
                 conn.commit()
 
-                # sync_nfo_to_db 内部通过 _resolve_category_id 更新了 category_id
-                resolved_cat = nfo.ugreen.category_id
-                new_utime = nfo.ugreen.utime
-                # 用 resolved_cat 重新查 DB 最新时间戳写入缓存
+                resolved_cat = cat
                 fresh = queries.fetch_video_by_category(conn, resolved_cat)
                 if fresh:
-                    st.update_cache(resolved_cat, fresh.ctime, new_utime, cache,
+                    st.update_cache(resolved_cat, fresh.ctime, nfo_mtime, cache,
                                     db_vid=fresh.ug_video_info_id)
                 else:
-                    st.update_cache(resolved_cat, 0, new_utime, cache)
+                    st.update_cache(resolved_cat, 0, nfo_mtime, cache)
                 st.save(cache)
-                log.info("Watchdog: 完成 %s (cat=%s cache utime=%d)",
-                         os.path.basename(nfo_path), resolved_cat, new_utime)
+                log.info("Watchdog: 完成 %s (cat=%s utime=%d)",
+                         os.path.basename(nfo_path), resolved_cat, nfo_mtime)
             except Exception:
                 conn.rollback()
                 log.error("Watchdog: DB 操作失败 %s", nfo_path, exc_info=True)

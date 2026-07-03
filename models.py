@@ -65,6 +65,51 @@ class FileInfo:
 
 
 @dataclass
+class UgreenRecord:
+    """.ugreen.json 完整数据 — 替代 NFO <ugreen> + TV NFO + 官方字段备份"""
+    version: int = 1
+    type: str = "movie"            # "movie" | "tvshow"
+
+    # 同步决策字段
+    category_id: str = ""
+    ug_video_info_id: int = 0
+    media_lib_set_id: int = 0
+    ctime: int = 0
+    utime: int = 0
+
+    # 官方字段（全量备份）
+    name: str = ""
+    year: int = 0
+    introduction: str = ""
+    score: float = 0.0
+    tmdb_id: int = 0
+    douban_id: int = 0
+    style_list: list[int] = field(default_factory=list)
+    grading: int = 0
+    release_date: int = 0
+    all_season_episode_num: int = 0
+
+    # 绿联扩展
+    genre: list[str] = field(default_factory=list)
+    play_history: list[PlayHistory] = field(default_factory=list)
+    favorites: list[Favorite] = field(default_factory=list)
+    collection: Optional[Collection] = None
+
+    # 电视剧专用
+    season: int = 0
+    episodes: list[dict] = field(default_factory=list)
+
+    def __post_init__(self):
+        """反序列化时恢复嵌套对象"""
+        if self.play_history and isinstance(self.play_history[0], dict):
+            self.play_history = [PlayHistory(**ph) for ph in self.play_history]
+        if self.favorites and isinstance(self.favorites[0], dict):
+            self.favorites = [Favorite(**fv) for fv in self.favorites]
+        if isinstance(self.collection, dict):
+            self.collection = Collection(**self.collection)
+
+
+@dataclass
 class VideoMeta:
     """视频元数据 — 对应 ug_video_info 表 + NFO 官方字段"""
     title: str = ""
@@ -86,74 +131,14 @@ class VideoMeta:
 
 
 @dataclass
-class UgreenMeta:
-    """绿联扩展字段 — 对应 <ugreen> 节点，用于同步决策"""
-    ug_video_info_id: int = 0
-    category_id: str = ""
-    use_nfo: int = 1
-    media_lib_set_id: int = 0
-    collection: Optional[Collection] = None
-    play_history: list[PlayHistory] = field(default_factory=list)
-    favorites: list[Favorite] = field(default_factory=list)
-    genre: list[str] = field(default_factory=list)
-    fileinfo: Optional[FileInfo] = None
-    ctime: int = 0
-    utime: int = 0
-
-
-@dataclass
-class TvEpisodeRecord:
-    """ugreen_tv.nfo 中的单集数据（对应 ug_television_episode 表）"""
-    ug_television_episode_id: int = 0
-    season: int = 0
-    episode: int = 0
-    name: str = ""
-    overview: str = ""
-    cover_path: str = ""
-    language: str = ""
-    episode_flag: str = ""
-    ctime: int = 0
-    utime: int = 0
-    media_lib_set_id: int = 0
-
-
-@dataclass
-class TvSeasonRecord:
-    """ugreen_tv.nfo 中的季数据（ug_video_info + 单集列表 + 关联数据）"""
-    category_id: str = ""
-    ug_video_info_id: int = 0
-    name: str = ""
-    year: int = 0
-    season: int = 0
-    introduction: str = ""
-    score: float = 0.0
-    douban_id: int = 0
-    tmdb_id: int = 0
-    release_date: int = 0
-    use_nfo: int = 1
-    grading: int = 0
-    country_list: list = field(default_factory=list)
-    style_list: list = field(default_factory=list)
-    all_season_episode_num: int = 0
-    media_lib_set_id: int = 0
-    ctime: int = 0
-    utime: int = 0
-    episodes: list[TvEpisodeRecord] = field(default_factory=list)
-    play_history: list[PlayHistory] = field(default_factory=list)
-    favorites: list[Favorite] = field(default_factory=list)
-    collection: Optional[Collection] = None
-    genre: list[str] = field(default_factory=list)
-
-
-@dataclass
 class NfoRecord:
     """一个完整的 NFO 文件解析结果"""
     nfo_type: str = ""           # "movie" | "tvshow" | "season" | "episode"
     nfo_path: str = ""
     video_dir: str = ""
+    category_id: str = ""        # 由 resolve_category_id 设置
+    ug_video_info_id: int = 0
     official: VideoMeta = field(default_factory=VideoMeta)
-    ugreen: UgreenMeta = field(default_factory=UgreenMeta)
-    has_ugreen: bool = False     # NFO 文件中是否存在 <ugreen> 节点
     # 记录 NFO 中实际出现了哪些官方字段（用于精确覆写）
     official_fields_present: set[str] = field(default_factory=set)
 
