@@ -11,10 +11,12 @@ def write_ugreen_from_db(video_dir: str, db: DbRecord,
                           db_play_history: list,
                           db_favorites: list,
                           db_collection: Optional[dict],
-                          old_ph_list: Optional[list] = None):
+                          old_ph_list: Optional[list] = None,
+                          old_nfo_snapshot: Optional[dict] = None):
     """DB → .ugreen.json：全量写入扩展数据 + 官方字段备份"""
     record = _build_ugreen_record(db, db_play_history, db_favorites, db_collection,
-                                   db.category_id, video_dir, old_ph_list)
+                                   db.category_id, video_dir, old_ph_list,
+                                   old_nfo_snapshot)
     if DRY_RUN:
         log.info("[DRY RUN] 将写入 .ugreen.json: %s", ugreen.ugreen_path(video_dir))
         return
@@ -24,7 +26,8 @@ def write_ugreen_from_db(video_dir: str, db: DbRecord,
 def _build_ugreen_record(db: DbRecord, db_play_history: list,
                           db_favorites: list, db_collection: Optional[dict],
                           category_id: str, video_dir: str,
-                          old_ph_list: Optional[list[PlayHistory]] = None
+                          old_ph_list: Optional[list[PlayHistory]] = None,
+                          old_nfo_snapshot: Optional[dict] = None
                           ) -> ugreen.UgreenRecord:
     """从 DB 查询结果构建 UgreenRecord（全表字段写入）。
     若传入 old_ph_list（旧 .ugreen.json 的历史记录），合并新旧 play_history 并去重。
@@ -33,11 +36,11 @@ def _build_ugreen_record(db: DbRecord, db_play_history: list,
     new_ph = _build_ph_list(db_play_history)
     if old_ph_list and old_ph_list is not None:
         merged = _merge_play_history(old_ph_list, new_ph)
-        log.info("合并 play_history: 旧=%d 新=%d 合并后=%d",
+        log.debug("合并 play_history: 旧=%d 新=%d 合并后=%d",
                  len(old_ph_list), len(new_ph), len(merged))
         ph_list = merged
     else:
-        log.info("play_history: 无旧记录，仅写入 DB 数据 (%d 条)", len(new_ph))
+        log.debug("play_history: 无旧记录，仅写入 DB 数据 (%d 条)", len(new_ph))
         ph_list = new_ph
 
     fav_list = [Favorite(**{k: v for k, v in f.items()}) for f in db_favorites]
@@ -72,7 +75,7 @@ def _build_ugreen_record(db: DbRecord, db_play_history: list,
         ug_video_info_id=db.ug_video_info_id,
         media_lib_set_id=db.media_lib_set_id,
         ctime=db.ctime, utime=db.utime,
-        # ug_video_info 全字段（除自增主键）
+        # ug_video_info 全量字段备份
         name=db.name or "",
         pinyin_first=db.pinyin_first or "",
         pinyin_full=db.pinyin_full or "",
@@ -102,9 +105,8 @@ def _build_ugreen_record(db: DbRecord, db_play_history: list,
         jp_name=db.jp_name or "",
         ug_media_id=db.ug_media_id or "",
         # 扩展
-        genre=db.style_list or [],
         play_history=ph_list, favorites=fav_list,
-        collection=col_obj,
+        collection=col_obj, nfo_snapshot=old_nfo_snapshot,
     )
 
 
@@ -132,28 +134,29 @@ def _build_ph_list(raw: list[dict]) -> list[PlayHistory]:
     return result
 
 
-def _ph_eq(a: PlayHistory, b: PlayHistory) -> bool:
-    """精确比对两条播放记录的所有字段"""
-    return (a.uid == b.uid
-            and a.category_id == b.category_id
-            and a.hash_fingerprint == b.hash_fingerprint
-            and a.progress == b.progress
-            and a.current_play_time == b.current_play_time
-            and a.last_access_time == b.last_access_time
-            and a.watch_status == b.watch_status
-            and a.media_lib_set_id == b.media_lib_set_id
-            and a.create_time == b.create_time
-            and a.iso_ts == b.iso_ts)
-
-
 def _merge_play_history(old: list[PlayHistory], new: list[PlayHistory]) -> list[PlayHistory]:
-    """合并新旧 play_history：取并集，移除全字段完全一致的重复记录。
+    """合并新旧 play_history：以 (uid, hash_fingerprint, last_access_time) 唯一标识一次播放。
 
-    不同播放记录即使 (uid, last_access_time) 相同也各自保留，
-    只删除所有 10 个字段完全一致的重复项（相同的事件被两次写入的情况）。"""
-    merged = old + new
-    seen = []
-    for ph in merged:
-        if not any(_ph_eq(ph, s) for s in seen):
-            seen.append(ph)
-    return seen
+    - 匹配到：用 DB 数据替换 JSON 旧记录（DB 有最新播放进度）
+    - 未匹配到的 DB 记录：追加为新播放记录
+    - 未匹配到的 JSON 历史记录：保留
+    """
+    # 构建 old 索引: (uid, hash, last_access_time) → index
+    old_index: dict[tuple, int] = {}
+    for i, ph in enumerate(old):
+        key = (ph.uid, ph.hash_fingerprint or "", ph.last_access_time)
+        old_index[key] = i
+
+    result = list(old)
+
+    for new_ph in new:
+        fp = new_ph.hash_fingerprint or ""
+        key = (new_ph.uid, fp, new_ph.last_access_time)
+        if key in old_index:
+            # 同一次播放 → 用 DB 数据替换（DB 有最新进度）
+            result[old_index[key]] = new_ph
+        else:
+            # 新的播放记录 → 追加
+            result.append(new_ph)
+
+    return result

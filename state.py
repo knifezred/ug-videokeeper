@@ -1,49 +1,116 @@
-"""本地状态缓存 — JSON 文件记录上次同步的快照，用于跳过无变化记录"""
+"""本地状态缓存 — SQLite 记录上次同步的快照，用于跳过无变化记录"""
 import json
 import os
-import threading
+import sqlite3
 from config import log
 
-# 缓存文件路径
-_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "state.json")
+_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+_DB_PATH = os.path.join(_DATA_DIR, "state.db")
+_JSON_PATH = os.path.join(_DATA_DIR, "state.json")
 
-# 线程锁（executor + watchdog 共享）
-_lock = threading.Lock()
+
+def _get_conn() -> sqlite3.Connection:
+    """获取线程本地 SQLite 连接"""
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    conn = sqlite3.connect(_DB_PATH)
+    conn.execute("""CREATE TABLE IF NOT EXISTS sync_cache (
+        category_id TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS sync_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )""")
+    return conn
 
 
 def load() -> dict:
-    """加载缓存，返回 {category_id: {db_ctime, db_utime}}"""
-    with _lock:
-        if not os.path.isfile(_STATE_FILE):
-            log.debug("缓存文件不存在: %s", _STATE_FILE)
-            return {}
-        try:
-            with open(_STATE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            log.debug("缓存已加载: %d 条来自 %s", len(data), _STATE_FILE)
-            return data
-        except (json.JSONDecodeError, IOError) as e:
-            log.warning("状态缓存加载失败，将重置: %s", e)
-            return {}
+    """（兼容旧接口）全量加载缓存。百万级库请改用 get_one / load_batch"""
+    conn = _get_conn()
+    rows = conn.execute("SELECT category_id, data FROM sync_cache").fetchall()
+    conn.close()
+    return {row[0]: json.loads(row[1]) for row in rows}
 
 
 def save(state: dict):
-    """保存缓存到文件（线程安全）"""
-    with _lock:
-        os.makedirs(os.path.dirname(_STATE_FILE), exist_ok=True)
-        with open(_STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-        log.debug("缓存已保存: %d 条 → %s", len(state), _STATE_FILE)
+    """（兼容旧接口）全量保存缓存到 SQLite"""
+    conn = _get_conn()
+    conn.executemany(
+        "INSERT OR REPLACE INTO sync_cache (category_id, data) VALUES (?, ?)",
+        [(cat, json.dumps(val, ensure_ascii=False)) for cat, val in state.items()]
+    )
+    conn.commit()
+    conn.close()
 
 
-def update_cache(category_id: str, db_ctime: int, db_utime: int,
-                  cache: dict, db_vid: int = 0, max_mtime: int = 0,
-                  content_hash: str = ""):
-    """同步完成后更新缓存"""
-    cache[category_id] = {
+def get_one(conn: sqlite3.Connection, category_id: str) -> dict | None:
+    """单条查询缓存"""
+    row = conn.execute(
+        "SELECT data FROM sync_cache WHERE category_id = ?", (category_id,)
+    ).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def load_batch(conn: sqlite3.Connection, cat_ids: list[str]) -> dict:
+    """批量加载缓存，返回 {category_id: data}"""
+    if not cat_ids:
+        return {}
+    placeholders = ",".join("?" * len(cat_ids))
+    rows = conn.execute(
+        f"SELECT category_id, data FROM sync_cache WHERE category_id IN ({placeholders})",
+        cat_ids,
+    ).fetchall()
+    return {row[0]: json.loads(row[1]) for row in rows}
+
+
+def save_batch(conn: sqlite3.Connection, batch: dict):
+    """批量保存缓存条目"""
+    if not batch:
+        return
+    conn.executemany(
+        "INSERT OR REPLACE INTO sync_cache (category_id, data) VALUES (?, ?)",
+        [(cat, json.dumps(val, ensure_ascii=False)) for cat, val in batch.items()]
+    )
+
+
+def make_entry(db_ctime: int, db_utime: int, db_vid: int = 0,
+               max_mtime: int = 0, content_hash: str = "") -> dict:
+    """创建缓存条目 dict，供 caller 放入 batch"""
+    return {
         "db_ctime": db_ctime,
         "db_utime": db_utime,
         "db_vid": db_vid,
         "max_mtime": max_mtime,
         "content_hash": content_hash,
     }
+
+
+def update_cache(category_id: str, db_ctime: int, db_utime: int,
+                 cache: dict, db_vid: int = 0, max_mtime: int = 0,
+                 content_hash: str = ""):
+    """（兼容旧接口）同步完成后更新缓存 dict"""
+    cache[category_id] = make_entry(db_ctime, db_utime, db_vid,
+                                     max_mtime, content_hash)
+
+
+def migrate_from_json():
+    """首次运行时从 state.json 迁移到 SQLite"""
+    if not os.path.isfile(_JSON_PATH):
+        return
+    conn = _get_conn()
+    try:
+        with open(_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data:
+            conn.executemany(
+                "INSERT OR REPLACE INTO sync_cache (category_id, data) VALUES (?, ?)",
+                [(cat, json.dumps(val, ensure_ascii=False)) for cat, val in data.items()]
+            )
+            conn.commit()
+            log.info("state.json 已迁移到 SQLite: %d 条", len(data))
+        os.rename(_JSON_PATH, _JSON_PATH + ".bak")
+        log.info("state.json 已重命名为 state.json.bak")
+    except (json.JSONDecodeError, IOError) as e:
+        log.warning("state.json 迁移失败（可忽略）: %s", e)
+    finally:
+        conn.close()

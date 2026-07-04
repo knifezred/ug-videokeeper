@@ -4,6 +4,7 @@ __pycache__/
 *.dist-info/
 
 data/state.json
+data/state.db
 
 venv/
 env/

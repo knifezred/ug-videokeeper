@@ -7,9 +7,10 @@
 
 import json
 import os
+from dataclasses import asdict
 from typing import Optional
 from config import log
-from models import UgreenRecord, PlayHistory, Favorite, Collection
+from models import UgreenRecord
 
 
 UGREEN_FILE = ".ugreen.json"
@@ -28,6 +29,7 @@ def read_ugreen(video_dir: str) -> Optional[UgreenRecord]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        data.pop("genre", None)  # 旧 JSON 兼容：genre 已删除
         record = UgreenRecord(**data)
         log.debug("读取 .ugreen.json: %s (cat=%s)", path, record.category_id)
         return record
@@ -47,98 +49,13 @@ def write_ugreen(video_dir: str, record: UgreenRecord):
 
 
 def _to_dict(record: UgreenRecord) -> dict:
-    """将 UgreenRecord 序列化为可 JSON 序列化的 dict"""
-    d = {
-        "version": record.version,
-        "category_id": record.category_id,
-        "ug_video_info_id": record.ug_video_info_id,
-        "media_lib_set_id": record.media_lib_set_id,
-        "ctime": record.ctime,
-        "utime": record.utime,
-        # ug_video_info 全字段
-        "name": record.name,
-        "pinyin_first": record.pinyin_first,
-        "pinyin_full": record.pinyin_full,
-        "to9_digit": record.to9_digit,
-        "year": record.year,
-        "season": record.season,
-        "introduction": record.introduction,
-        "score": record.score,
-        "douban_id": record.douban_id,
-        "tmdb_id": record.tmdb_id,
-        "style_list": record.style_list,
-        "grading": record.grading,
-        "release_date": record.release_date,
-        "last_release_date": record.last_release_date,
-        "all_season_episode_num": record.all_season_episode_num,
-        "country_list": record.country_list,
-        "type": record.type,
-        "use_nfo": record.use_nfo,
-        "poster_path": record.poster_path,
-        "backdrop_path": record.backdrop_path,
-        "logo_path": record.logo_path,
-        "tagline": record.tagline,
-        "no_lang_poster_path": record.no_lang_poster_path,
-        "no_lang_backdrop_path": record.no_lang_backdrop_path,
-        "language": record.language,
-        "old_category_id": record.old_category_id,
-        "collection_id": record.collection_id,
-        "collection_time": record.collection_time,
-        "last_play_file_path": record.last_play_file_path,
-        "jp_name": record.jp_name,
-        "ug_media_id": record.ug_media_id,
-        # 扩展
-        "genre": record.genre,
-    }
-    # play_history
-    d["play_history"] = [
-        {
-            "uid": ph.uid,
-            "category_id": ph.category_id,
-            "hash_fingerprint": ph.hash_fingerprint,
-            "progress": ph.progress,
-            "current_play_time": ph.current_play_time,
-            "last_access_time": ph.last_access_time,
-            "watch_status": ph.watch_status,
-            "media_lib_set_id": ph.media_lib_set_id,
-            "create_time": ph.create_time,
-            "iso_ts": ph.iso_ts,
-        }
-        for ph in record.play_history
-    ]
-    # favorites
-    d["favorites"] = [
-        {
-            "uid": fav.uid,
-            "create_time": fav.create_time,
-            "favorites_type": fav.favorites_type,
-        }
-        for fav in record.favorites
-    ]
-    # collection
-    if record.collection:
-        d["collection"] = {
-            "name": record.collection.name,
-            "collection_id": record.collection.collection_id,
-            "tmdb_id": record.collection.tmdb_id,
-            "pinyin_first": record.collection.pinyin_first,
-            "pinyin_full": record.collection.pinyin_full,
-            "poster_path": record.collection.poster_path,
-            "backdrop_path": record.collection.backdrop_path,
-            "language": record.collection.language,
-            "introduction": record.collection.introduction,
-            "is_manual_create": record.collection.is_manual_create,
-            "media_lib_set_id": record.collection.media_lib_set_id,
-            "year": record.collection.year,
-            "score": record.collection.score,
-            "category_id_list": record.collection.category_id_list,
-            "src_type": record.collection.src_type,
-            "jp_name": record.collection.jp_name,
-            "cloud_id": record.collection.cloud_id,
-            "ctime": record.collection.ctime,
-            "utime": record.collection.utime,
-        }
-    # episodes (电视剧专用)
-    if record.episodes:
-        d["episodes"] = record.episodes
+    """将 UgreenRecord 序列化为 JSON dict（全量备份）"""
+    d = asdict(record)
+    # 清理空值集合
+    if d.get("collection") is None:
+        del d["collection"]
+    if not d.get("episodes"):
+        del d["episodes"]
+    if d.get("nfo_snapshot") is None:
+        del d["nfo_snapshot"]
     return d

@@ -110,10 +110,12 @@ class UgreenRecord:
     ug_media_id: str = ""
 
     # 绿联扩展（来自 play_history / favorites / ug_collection）
-    genre: list[str] = field(default_factory=list)
     play_history: list[PlayHistory] = field(default_factory=list)
     favorites: list[Favorite] = field(default_factory=list)
     collection: Optional[Collection] = None
+
+    # NFO 字段快照，用于 Watchdog 逐字段 diff
+    nfo_snapshot: Optional[dict] = None
 
     # 电视剧专用
     episodes: list[dict] = field(default_factory=list)

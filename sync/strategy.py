@@ -48,8 +48,8 @@ def decide_from_cache(db_ctime: int, db_utime: int,
     """
     cache 存在时的决策。
 
-    cache.1: DB.ctime > cache.ctime 或 vid 变化 → NFO/JSON → DB  (重新刮削)
-    cache.2: 以上无变化，但 max_mtime > cache_max_mtime → DB → JSON  (用户行为)
+    cache.1: DB.ctime > cache.ctime 或 vid 变化 → JSON → DB  (重新刮削)
+    cache.2: 以上无变化，但 max_mtime ≠ cache_max_mtime → DB → JSON  (用户行为，含删除)
     cache.4: 以上无变化，但 content_hash 变化 → DB → JSON  (编辑 ug_video_info)
     cache.3: 全部一致 → skip
     """
@@ -66,14 +66,15 @@ def decide_from_cache(db_ctime: int, db_utime: int,
         log.debug("策略决策 cache.1: %s → NFO/JSON→DB", cause)
         return result
 
-    if db_mtime > cache_mtime:
+    if db_mtime != cache_mtime:
         result.direction = "db_to_json"
         result.scene = "cache.2"
+        sign = ">" if db_mtime > cache_mtime else "<"
         result.message = (
-            f"用户行为触发同步 (max_mtime={db_mtime} > cache_mtime={cache_mtime})，"
+            f"用户行为触发同步 (max_mtime={db_mtime} {sign} cache_mtime={cache_mtime})，"
             f"刷新 .ugreen.json"
         )
-        log.debug("策略决策 cache.2: max_mtime=%d > cache_mtime=%d → DB→JSON",
+        log.debug("策略决策 cache.2: max_mtime=%d != cache_mtime=%d → DB→JSON",
                   db_mtime, cache_mtime)
         return result
 

@@ -2,6 +2,7 @@
 import os
 import threading
 import time
+import sqlite3
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -98,27 +99,45 @@ class Watcher:
         if not ready:
             return
 
-        log.info("Watchdog: 发现 %d 个 NFO 变化", len(ready))
+        log.info("Watchdog: 发现 %d 个 NFO 变化，开始处理...", len(ready))
         for nfo_path in ready:
             self._sync_one(nfo_path)
+        log.info("Watchdog: %d 个 NFO 变更处理完成", len(ready))
 
     def _sync_one(self, nfo_path: str):
-        """.nfo 或 .ugreen.json 被编辑 → NFO→DB，仅处理 cache 中已有的 category_id"""
+        """.nfo 变化 → JSON diff → DB 恢复，仅处理 cache 中已有的 category_id"""
         try:
             video_dir = os.path.dirname(nfo_path)
 
             # 从 .ugreen.json 获取 category_id 和扩展数据
             ug = ugreen.read_ugreen(video_dir)
             if ug is None:
-                log.info("Watchdog: 无 .ugreen.json，跳过 %s (需先运行一次定时同步)", nfo_path)
+                log.debug("Watchdog: 无 .ugreen.json，跳过 %s (需先运行一次定时同步)", nfo_path)
                 return
             cat = ug.category_id
             if not cat:
                 log.warning("Watchdog: .ugreen.json 无 category_id，跳过 %s", nfo_path)
                 return
 
-            cache = st.load()
-            if cat not in cache:
+            # SQLite 单条查询，替代全量 load
+            try:
+                os.makedirs(os.path.dirname(st._DB_PATH), exist_ok=True)
+                _sqlite_conn = sqlite3.connect(st._DB_PATH)
+                try:
+                    _sqlite_conn.execute(
+                        "CREATE TABLE IF NOT EXISTS sync_cache "
+                        "(category_id TEXT PRIMARY KEY, data TEXT NOT NULL)"
+                    )
+                    row = _sqlite_conn.execute(
+                        "SELECT 1 FROM sync_cache WHERE category_id = ?", (cat,)
+                    ).fetchone()
+                finally:
+                    _sqlite_conn.close()
+            except (sqlite3.DatabaseError, OSError) as e:
+                log.warning("Watchdog: 缓存查询失败 %s: %s", nfo_path, e)
+                return
+            if not row:
+                log.debug("Watchdog: category_id=%s 不在缓存中，跳过 (需先运行一次定时同步建立缓存)", cat)
                 log.info("Watchdog: category_id=%s 不在缓存中，跳过 (需先运行一次定时同步建立缓存)", cat)
                 return
 
@@ -130,25 +149,40 @@ class Watcher:
                 nfo = NfoRecord(nfo_path=nfo_path, video_dir=video_dir,
                                 official=VideoMeta())
 
-            # NFO 字段合并到 .ugreen.json（仅 watchdog 路径）
-            if nfo.official.title:
-                ug.name = nfo.official.title
-            if nfo.official.year:
-                ug.year = nfo.official.year
-            if nfo.official.plot:
-                ug.introduction = nfo.official.plot
-            if nfo.official.rating:
-                ug.score = nfo.official.rating
-            if nfo.official.tmdbid:
-                ug.tmdb_id = nfo.official.tmdbid
-            if nfo.official.doubanid:
-                ug.douban_id = nfo.official.doubanid
-            if nfo.official.releasedate:
-                from utils import date_str_to_int
-                v = date_str_to_int(nfo.official.releasedate)
-                if v:
-                    ug.release_date = v
+            # NFO 字段 → .ugreen.json 逐字段合并（仅 4 个保护字段，基于 nfo_snapshot diff）
+            _nfo_field_map = {
+                "title": ("name", str),
+                "plot": ("introduction", str),
+                "rating": ("score", float),
+                "releasedate": ("release_date", None),  # 特殊转换
+            }
+            old_snapshot = ug.nfo_snapshot or {}
+            new_snapshot = {}
+            changed_count = 0
+
+            for nfo_key, (ug_field, converter) in _nfo_field_map.items():
+                raw = getattr(nfo.official, nfo_key, None)
+                new_snapshot[nfo_key] = str(raw) if raw is not None else ""
+
+                old_val = old_snapshot.get(nfo_key, "")
+                if str(raw) == old_val:
+                    continue  # NFO 中该字段未变化，保留 ugreen 值
+
+                # NFO 中该字段有变化 → 合并到 ugreen
+                if nfo_key == "releasedate":
+                    from utils import date_str_to_int
+                    v = date_str_to_int(raw) if raw else 0
+                    if v:
+                        setattr(ug, ug_field, v)
+                        changed_count += 1
+                elif raw:
+                    setattr(ug, ug_field, converter(raw) if converter else raw)
+                    changed_count += 1
+
+            # 更新 NFO 快照并写回
+            ug.nfo_snapshot = new_snapshot
             ugreen.write_ugreen(video_dir, ug)
+            log.debug("Watchdog: NFO diff 完成, %d/4 字段更新, cat=%s", changed_count, cat)
 
             conn = connect()
             try:
@@ -157,10 +191,10 @@ class Watcher:
                     log.warning("Watchdog: DB 无此记录 category_id=%s", cat)
                     return
 
-                log.info("Watchdog: NFO→DB %s cat=%s name=%s",
+                log.debug("Watchdog: JSON→DB %s cat=%s name=%s",
                          os.path.basename(nfo_path), cat, db_rec.name if db_rec else "")
 
-                # 写入 DB：官方字段来自 NFO，扩展字段来自 .ugreen.json
+                # 写入 DB：仅 14 个保护字段来自 .ugreen.json，NFO 字段不写 DB
                 db_sync.sync_nfo_to_db(conn, nfo)
 
                 # 用户编辑 NFO → 用文件 mtime 作为 utime
@@ -180,7 +214,7 @@ class Watcher:
                 else:
                     st.update_cache(resolved_cat, 0, nfo_mtime, cache)
                 st.save(cache)
-                log.info("Watchdog: 完成 %s (cat=%s utime=%d)",
+                log.debug("Watchdog: 完成 %s (cat=%s utime=%d)",
                          os.path.basename(nfo_path), resolved_cat, nfo_mtime)
             except Exception:
                 conn.rollback()

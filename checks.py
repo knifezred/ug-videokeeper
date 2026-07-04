@@ -30,7 +30,7 @@ def _check_ugreen_record_consistency():
         )
 
     # 3. 检查 UgreenRecord 所有字段都出现在 _to_dict 中
-    obj_fields = {"play_history", "favorites", "collection", "episodes"}
+    obj_fields = {"play_history", "favorites", "collection", "episodes", "nfo_snapshot"}
     missing_keys = {f for f in ur_fields if f not in obj_fields and f not in json_keys}
     if missing_keys:
         raise SyntaxError(f"UgreenRecord 字段在 _to_dict 中遗漏: {missing_keys}")
@@ -95,7 +95,7 @@ def _build_dummy_urecord():
         language="", old_category_id="", collection_id="",
         collection_time=0, last_play_file_path="", jp_name="",
         ug_media_id="",
-        genre=[], play_history=[], favorites=[], collection=None,
+        play_history=[], favorites=[], collection=None,
         episodes=[],
     )
 

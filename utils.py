@@ -58,18 +58,21 @@ def date_str_to_int(date_str: str) -> int:
 import os as _os
 
 _IMAGE_FIELDS = ("poster_path", "backdrop_path", "logo_path",
-                 "no_lang_poster_path", "no_lang_backdrop_path",
-                 "last_play_file_path")
+                 "no_lang_poster_path", "no_lang_backdrop_path")
 
 
-def fix_paths_for_video_dir(ug, video_dir: str):
-    """当文件夹路径与 .ugreen.json 中的路径不一致时，修正图片和播放路径。
-    仅处理本地绝对路径（/ 开头且不是 http），提取文件名拼接到当前目录，
-    文件存在则更新，不存在保留旧值。
+def fix_paths_for_video_dir(ug, video_dir: str, cat_changed: bool = False):
+    """当文件夹移动后，修正图片路径到新目录。
+    仅处理本地绝对路径（/ 开头且不是 http），且不含 @appstore/com.ugreen.videomgr。
+    cat_changed=False 时不执行修正。
     """
+    if not cat_changed:
+        return
     for attr in _IMAGE_FIELDS:
         old = getattr(ug, attr, None)
         if not old or not old.startswith("/") or old.startswith("http"):
+            continue
+        if "@appstore/com.ugreen.videomgr" in old:
             continue
         basename = _os.path.basename(old)
         new_path = _os.path.join(video_dir, basename)

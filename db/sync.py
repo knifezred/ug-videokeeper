@@ -1,271 +1,62 @@
-"""数据库写入 — NFO → DB 同步（upsert / sync / TV 构建）"""
+"""数据库写入 — .ugreen.json → DB 恢复 + 扩展数据写入"""
 import os
 import uuid
 import psycopg2.extras
 from typing import Optional
 from config import log
 from nfo import ugreen
-from models import (
-    NfoRecord, DbRecord, Actor, PlayHistory, Favorite, Collection,
-    UgreenRecord,
-)
-from utils import compute_file_hash, mpaa_to_int, date_str_to_int
-from db.queries import (
-    fetch_video_by_category, fetch_play_history, fetch_favorites, fetch_collection,
-)
+from models import Actor, PlayHistory, Favorite, Collection
+from utils import compute_file_hash
 
 
-# ---- SQL 构建辅助 ----
+# ---- .ugreen.json → DB 恢复 ----
 
-def _build_set_clause(data: dict) -> str:
-    """只对有值的字段生成 SET 子句 ('col1 = %s, col2 = %s, ...')"""
-    parts = [f"{k} = %s" for k in data if data[k] is not None]
-    return ", ".join(parts)
-
-
-def _build_set_values(data: dict) -> list:
-    return [v for v in data.values() if v is not None]
-
-
-# ---- ug_video_info upsert ----
-
-def _build_video_fields(nfo: NfoRecord) -> dict:
-    """从 NfoRecord 构建 ug_video_info 列字典，只包含有值的字段"""
-    o = nfo.official
-    present = nfo.official_fields_present
-    fields = {}
-
-    if "title" in present and o.title:
-        fields["name"] = o.title
-    if "year" in present and o.year:
-        fields["year"] = o.year
-    if "plot" in present and o.plot:
-        fields["introduction"] = o.plot
-    if "rating" in present and o.rating:
-        fields["score"] = o.rating
-    if "tmdbid" in present and o.tmdbid:
-        fields["tmdb_id"] = o.tmdbid
-    if "doubanid" in present and o.doubanid:
-        fields["douban_id"] = o.doubanid
-    if "mpaa" in present and o.mpaa:
-        fields["grading"] = mpaa_to_int(o.mpaa)
-    genre = _to_style_list(nfo)
-    if genre:
-        fields["style_list"] = genre
-    if "season" in present or "seasonnumber" in present:
-        fields["season"] = o.seasonnumber or o.season
-    if "releasedate" in present and o.releasedate:
-        fields["release_date"] = date_str_to_int(o.releasedate)
-    if "all_season_episode_num" in present and o.all_season_episode_num:
-        fields["all_season_episode_num"] = o.all_season_episode_num
-
-    return fields
-
-
-def upsert_video_info(conn, nfo: NfoRecord, category_id: str,
-                      ug: Optional["UgreenRecord"] = None) -> int:
+def sync_nfo_to_db(conn, nfo: "NfoRecord") -> int:
+    """.ugreen.json → DB：恢复保护字段 + 播放记录/收藏/合集。
+    供 executor 和 watcher 共用。NFO 字段不再写入 DB。
     """
-    将 NFO 官方字段写到 ug_video_info。
-    已存在(按 category_id)则 UPDATE（只覆写 NFO 中声明了的字段），
-    不存在则 INSERT（从 .ugreen.json 补全全字段）。
-    返回 ug_video_info_id。
-    """
-    import time as _time
-    fields = _build_video_fields(nfo)
-
-    existing = fetch_video_by_category(conn, category_id)
-
-    if existing:
-        update_fields = {
-            k: v for k, v in fields.items()
-            if k in nfo.official_fields_present or k == "style_list"
-        }
-        if not update_fields:
-            return existing.ug_video_info_id
-
-        set_clause = _build_set_clause(update_fields)
-        values = _build_set_values(update_fields) + [existing.category_id]
-        sql = f"UPDATE ug_video_info SET {set_clause} WHERE category_id = %s"
-        log.debug("UPDATE ug_video_info: %s", set_clause)
-    else:
-        fields.setdefault("category_id", category_id)
-        fields.setdefault("use_nfo", 1)
-        fields.setdefault("media_lib_set_id", 0)
-        fields.setdefault("ctime", 0)
-        fields.setdefault("utime", int(_time.time()))
-        # 从 .ugreen.json 补全全部字段（INSERT 时所有列都需要值）
-        if ug:
-            from dataclasses import fields as dc_fields
-            skip = {"version", "genre", "play_history", "favorites",
-                    "collection", "episodes", "ug_video_info_id"}
-            for f in dc_fields(ug.__class__):
-                if f.name not in fields and f.name not in skip:
-                    v = getattr(ug, f.name, None)
-                    if v is not None:
-                        fields[f.name] = v
-        columns = ", ".join(fields.keys())
-        placeholders = ", ".join(["%s"] * len(fields))
-        values = list(fields.values())
-        sql = f"INSERT INTO ug_video_info ({columns}) VALUES ({placeholders}) RETURNING ug_video_info_id"
-        log.debug("INSERT ug_video_info")
-
-    with conn.cursor() as cur:
-        cur.execute(sql, values)
-        if not existing:
-            new_id = cur.fetchone()[0]
-            log.debug("INSERT ug_video_info: cat=%s new_id=%d", category_id, new_id)
-            return new_id
-        log.debug("UPDATE ug_video_info: cat=%s id=%d", category_id, existing.ug_video_info_id)
-        return existing.ug_video_info_id
-
-
-def _to_style_list(nfo: NfoRecord) -> list[int]:
-    """将 official genre 转为 int 列表（适配 integer[] 列）"""
-    if "genre" in nfo.official_fields_present and nfo.official.genre:
-        return [int(g) for g in nfo.official.genre if g.isdigit()]
-    return []
-
-
-# ---- category_id 解析 ----
-
-def resolve_category_id(conn, video_dir: str, nfo_filename: str) -> str:
-    """通过 folder_path + NFO 文件名前缀定位 file_info，获取当前正确的 category_id"""
-    nfo_prefix = os.path.splitext(nfo_filename)[0].lower()
-    with conn.cursor() as cur:
-        if nfo_prefix:
-            cur.execute(
-                "SELECT category_id FROM file_info "
-                "WHERE folder_path = %s AND LOWER(file_name) LIKE %s LIMIT 1",
-                (video_dir, nfo_prefix + "%"),
-            )
-        else:
-            cur.execute(
-                "SELECT category_id FROM file_info WHERE folder_path = %s LIMIT 1",
-                (video_dir,),
-            )
-        row = cur.fetchone()
-    cat = row[0] if row else ""
-    if cat:
-        log.debug("resolve_category_id: dir=%s nfo=%s → %s", video_dir, nfo_filename, cat)
-    else:
-        log.warning("resolve_category_id: dir=%s nfo=%s → 未找到", video_dir, nfo_filename)
-    return cat
-
-
-# ---- NFO → DB 完整同步 ----
-
-def _fill_official_from_ugreen(nfo: "NfoRecord", ug):
-    """从 .ugreen.json 补全 NfoRecord 的官方字段（当 NFO 缺失时）"""
-    from utils import int_to_mpaa
-    o = nfo.official
-    if ug.name:
-        o.title = ug.name
-        nfo.official_fields_present.add("title")
-    if ug.year:
-        o.year = ug.year
-        nfo.official_fields_present.add("year")
-    if ug.introduction:
-        o.plot = ug.introduction
-        nfo.official_fields_present.add("plot")
-    if ug.score:
-        o.rating = ug.score
-        nfo.official_fields_present.add("rating")
-    if ug.tmdb_id:
-        o.tmdbid = ug.tmdb_id
-        nfo.official_fields_present.add("tmdbid")
-    if ug.douban_id:
-        o.doubanid = ug.douban_id
-        nfo.official_fields_present.add("doubanid")
-    if ug.style_list:
-        o.genre = [str(g) for g in ug.style_list]
-        nfo.official_fields_present.add("genre")
-    if ug.grading:
-        o.mpaa = int_to_mpaa(ug.grading)
-        nfo.official_fields_present.add("mpaa")
-    if ug.release_date:
-        from utils import int_to_date_str
-        o.releasedate = int_to_date_str(ug.release_date)
-        nfo.official_fields_present.add("releasedate")
-    if ug.all_season_episode_num:
-        o.all_season_episode_num = ug.all_season_episode_num
-        nfo.official_fields_present.add("all_season_episode_num")
-    log.debug("从 .ugreen.json 补全官方字段: fields=%d name=%r",
-              len(nfo.official_fields_present), o.title)
-
-
-def sync_nfo_to_db(conn, nfo: NfoRecord) -> int:
-    """NFO → 数据库 完整回写（视频元数据 + 播放记录 + 收藏 + 合集）。
-    官方字段来自 NfoRecord.official，扩展字段来自 .ugreen.json。
-    若 NFO 无官方字段，从 .ugreen.json 补全。
-    供 executor 和 watcher 共用。
-    """
-    # 读取 .ugreen.json（用于 category_id + 补全官方字段 + 扩展数据）
     ug = ugreen.read_ugreen(nfo.video_dir)
+    if ug is None:
+        log.warning("sync_nfo_to_db: 无 .ugreen.json, 跳过 cat=%s", nfo.category_id)
+        return 0
 
-    # category_id 优先级：executor 传入的 nfo.category_id（最新 file_info 值）
-    # > .ugreen.json 中的值（可能因目录重命名过期）> 空串
-    cat = nfo.category_id or (ug.category_id if ug else "") or ""
-    nfo.category_id = cat
+    cat = nfo.category_id or ug.category_id or ""
+    if not cat:
+        log.warning("sync_nfo_to_db: 无 category_id, 跳过")
+        return 0
 
-    # 若 NFO 无官方字段，从 .ugreen.json 补全
-    if ug and not nfo.official_fields_present:
-        _fill_official_from_ugreen(nfo, ug)
-
-    vid = upsert_video_info(conn, nfo, cat, ug=ug)
-
-    # 从 .ugreen.json 恢复 ug_video_info 全量字段（包括 NFO 不承载的）
-    if ug:
+    # category_id 变化 → 目录可能移动 → 修正图片路径
+    if cat != ug.category_id:
         from utils import fix_paths_for_video_dir
-        fix_paths_for_video_dir(ug, nfo.video_dir)
-        with conn.cursor() as cur:
-            cur.execute(
-                """UPDATE ug_video_info SET
-                     name = %s, pinyin_first = %s, pinyin_full = %s, to9_digit = %s,
-                     year = %s, season = %s, introduction = %s,
-                     score = %s, douban_id = %s, tmdb_id = %s,
-                     style_list = %s, grading = %s,
-                     release_date = %s, last_release_date = %s,
-                     all_season_episode_num = %s,
-                     country_list = %s, type = %s, use_nfo = %s,
-                     poster_path = %s, backdrop_path = %s,
-                     logo_path = %s, tagline = %s,
-                     no_lang_poster_path = %s, no_lang_backdrop_path = %s,
-                     language = %s, old_category_id = %s,
-                     collection_id = %s, collection_time = %s,
-                     media_lib_set_id = %s, last_play_file_path = %s,
-                     jp_name = %s, ug_media_id = %s,
-                     ctime = %s, utime = %s
-                   WHERE category_id = %s""",
-                (ug.name, ug.pinyin_first, ug.pinyin_full, ug.to9_digit,
-                 ug.year, ug.season, ug.introduction,
-                 ug.score, ug.douban_id, ug.tmdb_id,
-                 ug.style_list, ug.grading,
-                 ug.release_date, ug.last_release_date,
-                 ug.all_season_episode_num,
-                 ug.country_list, ug.type, ug.use_nfo,
-                 ug.poster_path, ug.backdrop_path,
-                 ug.logo_path, ug.tagline,
-                 ug.no_lang_poster_path, ug.no_lang_backdrop_path,
-                 ug.language, ug.old_category_id,
-                 ug.collection_id, ug.collection_time,
-                 ug.media_lib_set_id, ug.last_play_file_path,
-                 ug.jp_name, ug.ug_media_id,
-                 ug.ctime, ug.utime, cat),
-            )
+        fix_paths_for_video_dir(ug, nfo.video_dir, cat_changed=True)
 
-        # 扩展数据回写
-    if ug:
-        if ug.play_history:
-            log.debug("sync_nfo_to_db: 写入 %d 条播放记录", len(ug.play_history))
-            upsert_play_history(conn, ug.play_history,
-                                nfo.video_dir, os.path.basename(nfo.nfo_path))
-        if ug.favorites:
-            log.debug("sync_nfo_to_db: 写入 %d 条收藏 cat=%s", len(ug.favorites), cat)
-            upsert_favorites(conn, cat, ug.favorites)
-        if ug.collection and ug.collection.name:
-            log.debug("sync_nfo_to_db: 写入合集 %s cat=%s", ug.collection.name, cat)
-            upsert_collection_for_video(conn, cat, ug.collection)
-    return vid
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE ug_video_info SET
+                name = %s, introduction = %s, score = %s,
+                release_date = %s, country_list = %s, style_list = %s,
+                poster_path = %s, backdrop_path = %s, logo_path = %s,
+                ctime = %s, utime = %s
+            WHERE category_id = %s""",
+            (ug.name, ug.introduction, ug.score,
+             ug.release_date, ug.country_list, ug.style_list,
+             ug.poster_path, ug.backdrop_path, ug.logo_path,
+             ug.ctime, ug.utime, cat),
+        )
+        log.debug("sync_nfo_to_db: UPDATE 保护字段 cat=%s", cat)
+
+    # 扩展数据回写
+    if ug.play_history:
+        log.debug("sync_nfo_to_db: 写入 %d 条播放记录 cat=%s", len(ug.play_history), cat)
+        upsert_play_history(conn, ug.play_history,
+                            nfo.video_dir, os.path.basename(nfo.nfo_path))
+    if ug.favorites:
+        log.debug("sync_nfo_to_db: 写入 %d 条收藏 cat=%s", len(ug.favorites), cat)
+        upsert_favorites(conn, cat, ug.favorites)
+    if ug.collection and ug.collection.name:
+        log.debug("sync_nfo_to_db: 写入合集 %s cat=%s", ug.collection.name, cat)
+        upsert_collection_for_video(conn, cat, ug.collection)
+    return ug.ug_video_info_id
 
 
 # ---- 演员 ----
@@ -441,7 +232,7 @@ def upsert_play_history(conn, items: list[PlayHistory],
                          ph.current_play_time, ph.last_access_time,
                          ph.watch_status, ph.create_time, ph.iso_ts),
                     )
-    log.info("upsert_play_history: 写入 %d/%d 条", len(matched), len(items))
+    log.debug("upsert_play_history: 写入 %d/%d 条", len(matched), len(items))
 
 
 def _match_file_info(ph: PlayHistory, candidates: list[dict], nfo_prefix: str) -> dict | None:

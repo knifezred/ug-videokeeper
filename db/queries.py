@@ -1,6 +1,6 @@
 """数据库查询 — 纯 SELECT（不修改任何数据）"""
 import psycopg2.extras
-from typing import Optional
+from typing import Iterator, Optional
 from config import log
 from models import DbRecord, FileRecord
 
@@ -95,6 +95,71 @@ def fetch_all_file_info(conn, path_prefix: str = "") -> list[FileRecord]:
                 for k, v in row.items()
             }))
     return records
+
+
+def fetch_all_file_info_cursor(conn, path_prefix: str = "",
+                                batch_size: int = 500
+                                ) -> Iterator[list[FileRecord]]:
+    """服务端游标，分批返回 FileRecord。内存 O(batch_size) 而非 O(total)。"""
+    sql = """
+        SELECT
+            f.file_id, f.file_name, f.file_path, f.folder_path,
+            f.file_size, f.duration, f.season_num, f.episode_num,
+            f.clarity, f.category_id::text AS category_id, f.media_lib_set_id, f.use_nfo,
+            COALESCE(v.ug_video_info_id, 0) AS ug_video_info_id,
+            COALESCE(v.name, '') AS video_name,
+            COALESCE(v.type, 0) AS video_type,
+            COALESCE(v.season, 0) AS video_season,
+            COALESCE(v.ctime, 0) AS video_ctime,
+            COALESCE(v.utime, 0) AS video_utime,
+            GREATEST(
+                COALESCE(v.ctime, 0),
+                COALESCE(v.utime, 0),
+                COALESCE(ph.max_play, 0),
+                COALESCE(fv.max_fav, 0),
+                COALESCE(c.utime, 0)
+            ) AS max_mtime,
+            MD5(
+                COALESCE(v.name, '') || '|' ||
+                COALESCE(v.release_date::text, '0') || '|' ||
+                COALESCE(v.country_list::text, '{}') || '|' ||
+                COALESCE(v.style_list::text, '{}') || '|' ||
+                COALESCE(v.score::text, '0') || '|' ||
+                COALESCE(v.introduction, '') || '|' ||
+                COALESCE(v.poster_path, '') || '|' ||
+                COALESCE(v.backdrop_path, '') || '|' ||
+                COALESCE(v.logo_path, '')
+            ) AS content_hash
+        FROM file_info f
+        LEFT JOIN ug_video_info v ON f.category_id = v.category_id
+        LEFT JOIN (
+            SELECT category_id, MAX(last_access_time) AS max_play
+            FROM play_history GROUP BY category_id
+        ) ph ON ph.category_id = f.category_id
+        LEFT JOIN (
+            SELECT once_id, MAX(create_time) AS max_fav
+            FROM favorites GROUP BY once_id
+        ) fv ON fv.once_id = f.category_id
+        LEFT JOIN ug_collection c ON c.collection_id = v.collection_id
+    """
+    params = []
+    if path_prefix:
+        sql += " WHERE f.folder_path LIKE %s"
+        params.append(path_prefix + "%")
+
+    sql += " ORDER BY f.folder_path"
+
+    with conn.cursor(name="sync_cursor",
+                     cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, params)
+        while True:
+            rows = cur.fetchmany(batch_size)
+            if not rows:
+                break
+            yield [FileRecord(**{
+                k: (v if v is not None else _default_file(k))
+                for k, v in row.items()
+            }) for row in rows]
 
 
 # ---- 演员 ----

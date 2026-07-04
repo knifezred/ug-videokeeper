@@ -5,11 +5,13 @@ import schedule
 from config import SCAN_INTERVAL, WATCHDOG_ENABLED, MEDIA_LIB_PATHS, log
 from sync.executor import run_sync
 from watcher import Watcher
+import state as st
 
 _shutdown = threading.Event()
 
 
 def run():
+    st.migrate_from_json()
     log.info("ug-videokeeper 启动，扫描间隔: %s 秒", SCAN_INTERVAL)
 
     signal.signal(signal.SIGINT, lambda *_: _shutdown.set())
