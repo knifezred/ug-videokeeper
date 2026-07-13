@@ -122,7 +122,7 @@ def upsert_play_history(conn, items: list[PlayHistory],
                 media_lib_set_id, progress, current_play_time,
                 last_access_time, watch_status, create_time, iso_ts)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT ON CONSTRAINT idx_uid_once_ph
+               ON CONFLICT (uid, category_id, file_id)
                DO UPDATE SET
                  ug_video_info_id = EXCLUDED.ug_video_info_id,
                  file_id          = EXCLUDED.file_id,
