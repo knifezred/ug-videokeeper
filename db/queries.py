@@ -78,8 +78,7 @@ def fetch_all_file_info_cursor(conn, path_prefix: str = "",
 
     sql += " ORDER BY f.folder_path"
 
-    with conn.cursor(name="sync_cursor",
-                     cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(sql, params)
         while True:
             rows = cur.fetchmany(batch_size)

@@ -1,14 +1,10 @@
-# 使用预构建镜像 knifez/ug-videokeeper:latest（依赖已在构建时固化），
-# 不再需要 venv named volume + 运行时 pip install。
-# ./:/app 挂载保持兼容：state.db 落盘到宿主机 data/ 目录，代码热更也生效。
-
 services:
   sync:
     image: knifez/ug-videokeeper:latest
     container_name: ug-videokeeper-sync
     restart: unless-stopped
     environment:
-      - DB_HOST=127.0.0.1
+      - DB_HOST=host.docker.internal
       - DB_PORT=5433
       - DB_NAME=video
       - DB_USER=postgres
@@ -20,8 +16,8 @@ services:
       - LOG_LEVEL=INFO
     volumes:
       - 你的绿联媒体目录:/你的绿联媒体目录
-      - ./:/app
-    working_dir: /app
+      - ./data:/app/data
+    network_mode: "host"          # 使用主机网络模式（保证服务发现正常）
     command: ["python", "main.py"]
 
   web:
@@ -33,6 +29,5 @@ services:
     ports:
       - "8088:8088"
     volumes:
-      - ./:/app
-    working_dir: /app
+      - ./data:/app/data
     command: ["python", "main.py", "--serve"]
