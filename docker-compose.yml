@@ -4,7 +4,7 @@ services:
     container_name: ug-videokeeper-sync
     restart: unless-stopped
     environment:
-      - DB_HOST=host.docker.internal
+      - DB_HOST=127.0.0.1
       - DB_PORT=5433
       - DB_NAME=video
       - DB_USER=postgres
