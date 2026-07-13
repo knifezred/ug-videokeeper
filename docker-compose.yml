@@ -1,9 +1,11 @@
-version: "3.8"
+# 使用预构建镜像 knifez/ug-videokeeper:latest（依赖已在构建时固化），
+# 不再需要 venv named volume + 运行时 pip install。
+# ./:/app 挂载保持兼容：state.db 落盘到宿主机 data/ 目录，代码热更也生效。
 
 services:
-  ug-videokeeper:
-    image: python:3.11-slim
-    container_name: ug-videokeeper
+  sync:
+    image: knifez/ug-videokeeper:latest
+    container_name: ug-videokeeper-sync
     restart: unless-stopped
     environment:
       - DB_HOST=127.0.0.1
@@ -14,10 +16,23 @@ services:
       - SCAN_INTERVAL=3600
       - SYNC_MODE=bidirectional
       - DRY_RUN=false
-      # - TARGET_PATH=/volume1/media/movie   # 取消注释限定同步范围
+      # - TARGET_PATH=/volume1/media/movie
       - LOG_LEVEL=INFO
     volumes:
       - 你的绿联媒体目录:/你的绿联媒体目录
       - ./:/app
     working_dir: /app
-    command: sh -c "pip install -r requirements.txt && python main.py"
+    command: ["python", "main.py"]
+
+  web:
+    image: knifez/ug-videokeeper:latest
+    container_name: ug-videokeeper-web
+    restart: unless-stopped
+    depends_on:
+      - sync
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: ["python", "main.py", "--serve"]

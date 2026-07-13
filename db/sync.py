@@ -5,7 +5,7 @@ import psycopg2.extras
 from typing import Optional
 from config import log
 from nfo import ugreen
-from models import Actor, PlayHistory, Favorite, Collection
+from models import PlayHistory, Favorite, Collection, USER_EDITABLE_FIELDS
 from utils import compute_file_hash
 
 
@@ -30,20 +30,17 @@ def sync_nfo_to_db(conn, nfo: "NfoRecord") -> int:
         from utils import fix_paths_for_video_dir
         fix_paths_for_video_dir(ug, nfo.video_dir, cat_changed=True)
 
+    # 仅还原用户在 NAS UI 可编辑的字段（USER_EDITABLE_FIELDS）；
+    # 其余字段仅写入 .ugreen.json 备份，恢复时不回写，避免旧备份覆盖 DB 新刮削值
+    cols = list(USER_EDITABLE_FIELDS)
+    set_clause = ", ".join(f"{c} = %s" for c in cols)
+    params = [getattr(ug, c) for c in cols] + [cat]
     with conn.cursor() as cur:
-        cur.execute("""
-            UPDATE ug_video_info SET
-                name = %s, introduction = %s, score = %s,
-                release_date = %s, country_list = %s, style_list = %s,
-                poster_path = %s, backdrop_path = %s, logo_path = %s,
-                ctime = %s, utime = %s
-            WHERE category_id = %s""",
-            (ug.name, ug.introduction, ug.score,
-             ug.release_date, ug.country_list, ug.style_list,
-             ug.poster_path, ug.backdrop_path, ug.logo_path,
-             ug.ctime, ug.utime, cat),
+        cur.execute(
+            f"UPDATE ug_video_info SET {set_clause} WHERE category_id = %s",
+            params,
         )
-        log.debug("sync_nfo_to_db: UPDATE 保护字段 cat=%s", cat)
+        log.debug("sync_nfo_to_db: UPDATE 用户可编辑字段 cat=%s", cat)
 
     # 扩展数据回写
     if ug.play_history:
@@ -56,90 +53,12 @@ def sync_nfo_to_db(conn, nfo: "NfoRecord") -> int:
     if ug.collection and ug.collection.name:
         log.debug("sync_nfo_to_db: 写入合集 %s cat=%s", ug.collection.name, cat)
         upsert_collection_for_video(conn, cat, ug.collection)
+    # 演员仅备份到 .ugreen.json，不还原到 DB
     return ug.ug_video_info_id
 
 
-# ---- 演员 ----
-
-def upsert_actors(conn, category_id: str, actors: list[Actor],
-                  media_lib_set_id: int = 0):
-    """删除旧演员关联，写入新的"""
-    with conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM ug_video_actor_relation WHERE category_id = %s",
-            (category_id,),
-        )
-    if not actors:
-        log.debug("upsert_actors: 无演员, cat=%s", category_id)
-        return
-
-    once_ids = _ensure_actors_batch(conn, actors)
-    values = [(category_id, a.role or "", oid, seq, media_lib_set_id)
-              for seq, (a, oid) in enumerate(zip(actors, once_ids))]
-
-    with conn.cursor() as cur:
-        psycopg2.extras.execute_values(
-            cur,
-            """INSERT INTO ug_video_actor_relation
-               (category_id, role, actor_once_id, actor_sequence, media_lib_set_id)
-               VALUES %s""",
-            values,
-        )
-    log.debug("upsert_actors: 写入 %d 个演员关联 cat=%s", len(values), category_id)
-
-
-def _ensure_actors_batch(conn, actors: list[Actor]) -> list[str]:
-    """批量查找或创建 ug_actor，返回 actor_once_id 列表（顺序与输入一致）"""
-    if not actors:
-        return []
-
-    tmdb_ids = [a.tmdbid for a in actors if a.tmdbid]
-    names = [a.name for a in actors]
-
-    tmdb_map: dict[int, str] = {}
-    if tmdb_ids:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT tmdb_id, actor_once_id FROM ug_actor WHERE tmdb_id = ANY(%s)",
-                (tmdb_ids,),
-            )
-            for row in cur.fetchall():
-                tmdb_map[row[0]] = row[1]
-
-    name_map: dict[str, str] = {}
-    if names:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT name, actor_once_id FROM ug_actor WHERE name = ANY(%s)",
-                (names,),
-            )
-            for row in cur.fetchall():
-                name_map[row[0]] = row[1]
-
-    results: list[str] = []
-    to_insert: list[tuple] = []
-
-    for a in actors:
-        if a.tmdbid and a.tmdbid in tmdb_map:
-            results.append(tmdb_map[a.tmdbid])
-        elif a.name in name_map:
-            results.append(name_map[a.name])
-        else:
-            once_id = f"ug_actor_{uuid.uuid4().hex[:8]}"
-            results.append(once_id)
-            to_insert.append((0, once_id, a.name, a.tmdbid or 0, 2))
-
-    if to_insert:
-        log.debug("_ensure_actors_batch: 创建 %d 个新演员", len(to_insert))
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO ug_actor (actor_id, actor_once_id, name, tmdb_id, actor_data_source)
-                   VALUES %s""",
-                to_insert,
-            )
-
-    return results
+# 演员仅备份到 .ugreen.json，不做还原到 DB 的其他处理
+# （备份写入见 nfo/writer.py _build_ugreen_record）
 
 
 # ---- 播放记录 ----
@@ -182,56 +101,43 @@ def upsert_play_history(conn, items: list[PlayHistory],
     if not matched:
         return
 
-    # 按 (uid, file_id) 去重，只保留最新一条（数据库只需要最新的播放进度）
-    # 完整历史保留在 .ugreen.json 中
+    # 按完整唯一约束键 (uid, category_id, file_id) 去重，只保留最新一条
+    # （完整历史仍保留在 .ugreen.json 中）
     seen: dict[tuple, tuple] = {}
     for ph, fid, cat, vid in matched:
-        key = (ph.uid, fid)
+        key = (ph.uid, cat, fid)
         if key not in seen or ph.last_access_time > seen[key][0].last_access_time:
             seen[key] = (ph, fid, cat, vid)
     matched = list(seen.values())
 
-    by_cat: dict[str, list] = {}
-    for ph, fid, cat, vid in matched:
-        by_cat.setdefault(cat, []).append((ph, fid, vid))
-
+    # 用 ON CONFLICT 让数据库自身保证唯一性：
+    # 彻底消除「先 SELECT 查存在再分支 INSERT/UPDATE」的竞态与类型错配，
+    # 同时兼容重复调用、历史数据已存在等所有场景。
+    # 冲突时仅在 JSON 记录确实比 DB 更新（last_access_time 更大）才覆盖，
+    # 否则保留 DB 已有的最新播放记录——绝不拿旧备份覆盖新进度。
     with conn.cursor() as cur:
-        for cat, group in by_cat.items():
-            uids = [ph.uid for ph, _, _ in group]
-            cur.execute(
-                "SELECT uid FROM play_history WHERE category_id = %s AND uid = ANY(%s)",
-                (cat, uids),
-            )
-            existing = {r[0] for r in cur.fetchall()}
-
-            for ph, fid, vid in group:
-                if ph.uid in existing:
-                    cur.execute(
-                        """UPDATE play_history
-                           SET ug_video_info_id = %s, file_id = %s,
-                               media_lib_set_id = %s, progress = %s,
-                               current_play_time = %s, last_access_time = %s,
-                               watch_status = %s, create_time = %s,
-                               iso_ts = %s
-                           WHERE category_id = %s AND uid = %s""",
-                        (vid, fid, ph.media_lib_set_id, ph.progress,
-                         ph.current_play_time, ph.last_access_time,
-                         ph.watch_status, ph.create_time, ph.iso_ts,
-                         cat, ph.uid),
-                    )
-                else:
-                    cur.execute(
-                        """INSERT INTO play_history
-                           (uid, category_id, ug_video_info_id, file_id,
-                            media_lib_set_id, progress, current_play_time,
-                            last_access_time, watch_status, create_time,
-                            iso_ts)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                                   %s, %s)""",
-                        (ph.uid, cat, vid, fid, ph.media_lib_set_id, ph.progress,
-                         ph.current_play_time, ph.last_access_time,
-                         ph.watch_status, ph.create_time, ph.iso_ts),
-                    )
+        cur.executemany(
+            """INSERT INTO play_history
+               (uid, category_id, ug_video_info_id, file_id,
+                media_lib_set_id, progress, current_play_time,
+                last_access_time, watch_status, create_time, iso_ts)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT ON CONSTRAINT idx_uid_once_ph
+               DO UPDATE SET
+                 ug_video_info_id = EXCLUDED.ug_video_info_id,
+                 file_id          = EXCLUDED.file_id,
+                 media_lib_set_id = EXCLUDED.media_lib_set_id,
+                 progress         = EXCLUDED.progress,
+                 current_play_time = EXCLUDED.current_play_time,
+                 last_access_time = EXCLUDED.last_access_time,
+                 watch_status    = EXCLUDED.watch_status,
+                 create_time     = EXCLUDED.create_time,
+                 iso_ts           = EXCLUDED.iso_ts
+               WHERE EXCLUDED.last_access_time > play_history.last_access_time""",
+            [(ph.uid, cat, vid, fid, ph.media_lib_set_id, ph.progress,
+              ph.current_play_time, ph.last_access_time, ph.watch_status,
+              ph.create_time, ph.iso_ts) for ph, fid, cat, vid in matched],
+        )
     log.debug("upsert_play_history: 写入 %d/%d 条", len(matched), len(items))
 
 

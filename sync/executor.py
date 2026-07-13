@@ -1,6 +1,5 @@
 """同步执行器 — 遍历 file_info 表，cache 不存在/存在两种决策路径"""
 import os
-import sqlite3
 from config import log, DRY_RUN, TARGET_PATH
 from db import queries, sync as db_sync
 from db.connection import connect
@@ -9,13 +8,22 @@ from nfo.reader import read_nfo
 from nfo.writer import write_ugreen_from_db
 from sync.strategy import decide_first_sync, decide_from_cache
 from models import NfoRecord, VideoMeta, FileRecord
-from models import UgreenRecord, PlayHistory, Favorite, Collection
+from models import UgreenRecord, PlayHistory, Favorite, Collection, Actor, USER_EDITABLE_FIELDS
 import state as st
+
+
+def _safe_float(v, default: float = 0.0) -> float:
+    """外部/JSON 数据转 float；脏值（如 '8.5x'）返回默认值而非崩。"""
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return default
 
 
 def run_sync():
     conn = connect()
-    sqlite_conn = sqlite3.connect(st._DB_PATH)
+    conn.autocommit = True  # 命名游标需 autocommit：增量读取且不持有事务（否则 WITH HOLD 在事务内崩溃）
+    sqlite_conn = st.open_db()
     sqlite_conn.execute("""CREATE TABLE IF NOT EXISTS sync_cache (
         category_id TEXT PRIMARY KEY, data TEXT NOT NULL
     )""")
@@ -61,6 +69,10 @@ def run_sync():
                         cache_mtime=cached_entry.get("max_mtime", 0),
                         db_hash=fr.content_hash,
                         cache_hash=cached_entry.get("content_hash", ""),
+                        db_fav_count=fr.fav_count,
+                        cache_fav_count=cached_entry.get("fav_count", 0),
+                        db_collection_id=fr.video_collection_id,
+                        cache_collection_id=cached_entry.get("collection_id", ""),
                     )
                     if decision.direction == "skip":
                         stats["cached"] += 1
@@ -83,16 +95,17 @@ def run_sync():
                 if decision.direction != "skip":
                     _update_cache(cache, fr)
 
+            # 每批落盘：缓存写 SQLite + PG 按批提交（游标 WITH HOLD，批间可提交）
             if not DRY_RUN:
                 st.save_batch(sqlite_conn, cache)
                 sqlite_conn.commit()
+                conn.commit()
 
-        if not DRY_RUN:
-            conn.commit()
-            log.info("DB 已提交，SQLite 缓存已保存")
-        else:
+        if DRY_RUN:
             conn.rollback()
             log.info("[DRY RUN] 跳过写入，缓存未保存")
+        else:
+            log.info("DB 已按批提交，SQLite 缓存已按批保存")
     except Exception:
         conn.rollback()
         raise
@@ -166,7 +179,8 @@ def _write_ugreen_from_db(conn, category_id: str, folder: str):
     log.debug("play_history 合并准备: 旧=%s 条 new=%d 条",
              len(old_ph) if old_ph else "无", len(db_play))
     write_ugreen_from_db(folder, db_rec, db_play, db_fav, db_col,
-                         old_ph_list=old_ph, old_nfo_snapshot=old_snap)
+                         old_ph_list=old_ph, old_nfo_snapshot=old_snap,
+                         db_actors=db_actors)
 
 
 # ---- 电视剧 ----
@@ -187,6 +201,10 @@ def _process_tv(conn, fr: FileRecord, folder: str,
             cache_mtime=cached_entry.get("max_mtime", 0),
             db_hash=fr.content_hash,
             cache_hash=cached_entry.get("content_hash", ""),
+            db_fav_count=fr.fav_count,
+            cache_fav_count=cached_entry.get("fav_count", 0),
+            db_collection_id=fr.video_collection_id,
+            cache_collection_id=cached_entry.get("collection_id", ""),
         )
         if decision.direction == "skip":
             stats["cached"] += 1
@@ -228,18 +246,14 @@ def _restore_tv_from_ugreen(conn, ug, folder: str, cat_changed: bool = False):
     if cat_changed:
         from utils import fix_paths_for_video_dir
         fix_paths_for_video_dir(ug, folder, cat_changed=True)
+    # 仅还原用户在 NAS UI 可编辑的字段（USER_EDITABLE_FIELDS）；其余仅备份不还原
+    cols = list(USER_EDITABLE_FIELDS)
+    set_clause = ", ".join(f"{c} = %s" for c in cols)
+    params = [getattr(ug, c) for c in cols] + [ug.category_id]
     with conn.cursor() as cur:
         cur.execute(
-            """UPDATE ug_video_info SET
-                 name = %s, introduction = %s, score = %s,
-                 release_date = %s, country_list = %s, style_list = %s,
-                 poster_path = %s, backdrop_path = %s, logo_path = %s,
-                 ctime = %s, utime = %s
-               WHERE category_id = %s""",
-            (ug.name, ug.introduction, ug.score,
-             ug.release_date, ug.country_list, ug.style_list,
-             ug.poster_path, ug.backdrop_path, ug.logo_path,
-             ug.ctime, ug.utime, ug.category_id),
+            f"UPDATE ug_video_info SET {set_clause} WHERE category_id = %s",
+            params,
         )
     for ep in ug.episodes:
         with conn.cursor() as cur:
@@ -263,6 +277,7 @@ def _restore_tv_from_ugreen(conn, ug, folder: str, cat_changed: bool = False):
         db_sync.upsert_favorites(conn, ug.category_id, ug.favorites)
     if ug.collection and ug.collection.name:
         db_sync.upsert_collection_for_video(conn, ug.category_id, ug.collection)
+    # 演员仅备份到 .ugreen.json，不还原到 DB
     log.debug("TV 恢复: cat=%s episodes=%d", ug.category_id, len(ug.episodes))
 
 
@@ -276,6 +291,9 @@ def _dump_tv_to_ugreen(conn, category_id: str, folder: str):
     phs = queries.fetch_play_history(conn, category_id)
     favs = queries.fetch_favorites(conn, category_id)
     col = queries.fetch_collection(conn, category_id)
+    db_actors = queries.fetch_actors(conn, category_id)
+    actor_list = [Actor(name=a.get("name", ""), role=a.get("role", ""),
+                        tmdbid=a.get("tmdb_id", 0)) for a in db_actors]
 
     from nfo.writer import _build_ph_list, _merge_play_history
     new_ph = _build_ph_list(phs)
@@ -301,7 +319,7 @@ def _dump_tv_to_ugreen(conn, category_id: str, folder: str):
             language=col.get("language", ""), introduction=col.get("introduction", ""),
             is_manual_create=bool(col.get("is_manual_create")),
             media_lib_set_id=col.get("media_lib_set_id", 0),
-            year=col.get("year", 0), score=float(col.get("score", 0) or 0),
+            year=col.get("year", 0), score=_safe_float(col.get("score", 0)),
             category_id_list=[str(c) for c in cats] if cats else [],
             src_type=col.get("src_type", 0), jp_name=col.get("jp_name", ""),
             cloud_id=col.get("cloud_id", ""), ctime=col.get("ctime", 0), utime=col.get("utime", 0),
@@ -343,7 +361,7 @@ def _dump_tv_to_ugreen(conn, category_id: str, folder: str):
         ug_media_id=db_rec.ug_media_id or "",
         # 扩展
         episodes=eps, play_history=ph_list,
-        favorites=fav_list, collection=col_obj,
+        favorites=fav_list, collection=col_obj, actors=actor_list,
         nfo_snapshot=old_snap,
     )
     if DRY_RUN:
@@ -374,7 +392,8 @@ def _find_nfo_for_record(fr: FileRecord) -> str | None:
 def _update_cache(cache: dict, fr: FileRecord):
     st.update_cache(fr.category_id, fr.video_ctime, fr.video_utime,
                     cache, db_vid=fr.ug_video_info_id, max_mtime=fr.max_mtime,
-                    content_hash=fr.content_hash)
+                    content_hash=fr.content_hash, fav_count=fr.fav_count,
+                    collection_id=fr.video_collection_id)
 
 
 def _log_summary(stats: dict):
@@ -382,9 +401,9 @@ def _log_summary(stats: dict):
     log.info("  缓存跳过: %d", stats.get("cached", 0))
     log.info("  NFO/JSON → DB: %d", stats.get("nfo_to_db", 0))
     log.info("  DB → JSON: %d", stats.get("db_to_json", 0))
-    if stats.get("error", 0):
-        log.warning("  错误:     %d", stats.get("error", 0))
-    if stats.get("error", 0):
-        log.warning("======== %d 条错误，请检查上方日志 ========", stats["error"])
+    error_count = stats.get("error", 0)
+    if error_count:
+        log.warning("  错误:     %d", error_count)
+        log.warning("======== %d 条错误，请检查上方日志 ========", error_count)
     else:
         log.info("======== 同步完成，无错误 ========")

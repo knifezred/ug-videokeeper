@@ -1,5 +1,5 @@
 """数据模型 — 对应数据库表与 NFO 结构"""
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dc_fields, MISSING
 from typing import Optional
 
 
@@ -113,6 +113,7 @@ class UgreenRecord:
     play_history: list[PlayHistory] = field(default_factory=list)
     favorites: list[Favorite] = field(default_factory=list)
     collection: Optional[Collection] = None
+    actors: list[Actor] = field(default_factory=list)  # 演员关系（备份/恢复）
 
     # NFO 字段快照，用于 Watchdog 逐字段 diff
     nfo_snapshot: Optional[dict] = None
@@ -128,6 +129,10 @@ class UgreenRecord:
             self.favorites = [Favorite(**fv) for fv in self.favorites]
         if isinstance(self.collection, dict):
             self.collection = Collection(**self.collection)
+        if self.actors and isinstance(self.actors[0], dict):
+            self.actors = [Actor(name=a.get("name", ""), role=a.get("role", ""),
+                                 tmdbid=a.get("tmdbid", a.get("tmdb_id", 0)))
+                           for a in self.actors]
 
 
 @dataclass
@@ -205,6 +210,43 @@ class DbRecord:
     utime: int = 0
 
 
+# ---- ug_video_info 字段单一权威来源 ----
+# DbRecord 是 ug_video_info 查询结果的容器，其字段即表的列。
+# 以下派生量全部以 DbRecord 为准：新增/删除列只需改 DbRecord 一处。
+# 查询列（不含 use_nfo：该字段由其他写入路径管理，不参与此 SELECT）
+VIDEO_INFO_COLUMNS: tuple[str, ...] = tuple(
+    f.name for f in dc_fields(DbRecord) if f.name != "use_nfo"
+)
+
+
+def _build_db_defaults() -> dict:
+    """由 DbRecord 字段默认值自动生成 NULL 兜底映射，杜绝手写漂移"""
+    d: dict = {}
+    for f in dc_fields(DbRecord):
+        if f.default is not MISSING:
+            d[f.name] = f.default
+        elif f.default_factory is not MISSING:  # noqa: E721
+            d[f.name] = f.default_factory()
+        else:
+            d[f.name] = ""
+    return d
+
+
+DB_DEFAULTS: dict = _build_db_defaults()
+
+
+# 用户在 NAS UI 可直接编辑、且从 .ugreen.json 恢复时必须还原的字段。
+# 其余 ug_video_info 字段（year / tmdb_id / douban_id / grading / type 等）
+# 仅写入 .ugreen.json 做备份，恢复时不回写——
+# 避免用旧备份覆盖 DB 中由刮削器刷新的新值。
+USER_EDITABLE_FIELDS: frozenset[str] = frozenset({
+    "name", "introduction", "score",
+    "release_date", "country_list", "style_list",
+    "poster_path", "backdrop_path", "logo_path",
+    "ctime", "utime",
+})
+
+
 @dataclass
 class SyncResult:
     """单次同步结果"""
@@ -237,5 +279,7 @@ class FileRecord:
     video_season: int = 0
     video_ctime: int = 0
     video_utime: int = 0
+    video_collection_id: str = ""  # ug_video_info.collection_id（检测合集增删）
+    fav_count: int = 0          # 收藏数（检测收藏增删）
     max_mtime: int = 0          # 五张表的最新时间戳（用于缓存决策）
     content_hash: str = ""      # 9 个用户可编辑字段的哈希（检测 u время 不变时的内容变化）

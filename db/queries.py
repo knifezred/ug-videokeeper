@@ -2,25 +2,15 @@
 import psycopg2.extras
 from typing import Iterator, Optional
 from config import log
-from models import DbRecord, FileRecord
+from models import DbRecord, FileRecord, VIDEO_INFO_COLUMNS, DB_DEFAULTS
 
 
 # ---- 视频 ----
 
 def fetch_video_by_category(conn, category_id: str) -> Optional[DbRecord]:
     """按 category_id 查询 ug_video_info 全部列（除自增主键 ug_video_info_id）"""
-    sql = """
-        SELECT ug_video_info_id, category_id, name,
-               pinyin_first, pinyin_full, to9_digit,
-               year, season, introduction, score,
-               douban_id, tmdb_id, style_list, grading,
-               release_date, last_release_date, all_season_episode_num,
-               country_list, type,
-               poster_path, backdrop_path, logo_path, tagline,
-               no_lang_poster_path, no_lang_backdrop_path,
-               language, old_category_id, collection_id, collection_time,
-               media_lib_set_id, last_play_file_path,
-               jp_name, ug_media_id, ctime, utime
+    sql = f"""
+        SELECT {", ".join(VIDEO_INFO_COLUMNS)}
         FROM ug_video_info
         WHERE category_id = %s
     """
@@ -29,73 +19,10 @@ def fetch_video_by_category(conn, category_id: str) -> Optional[DbRecord]:
         row = cur.fetchone()
     if row is None:
         return None
-    return DbRecord(**{k: (v if v is not None else _default(k)) for k, v in row.items()})
+    return DbRecord(**{k: (v if v is not None else DB_DEFAULTS.get(k, "")) for k, v in row.items()})
 
 
 # ---- 文件 ----
-
-def fetch_all_file_info(conn, path_prefix: str = "") -> list[FileRecord]:
-    """查询 file_info 数据，JOIN ug_video_info 获取 ctime/utime。
-    若 path_prefix 非空，仅返回 folder_path LIKE '{path_prefix}%' 的记录。
-    """
-    sql = """
-        SELECT
-            f.file_id, f.file_name, f.file_path, f.folder_path,
-            f.file_size, f.duration, f.season_num, f.episode_num,
-            f.clarity, f.category_id::text AS category_id, f.media_lib_set_id, f.use_nfo,
-            COALESCE(v.ug_video_info_id, 0) AS ug_video_info_id,
-            COALESCE(v.name, '') AS video_name,
-            COALESCE(v.type, 0) AS video_type,
-            COALESCE(v.season, 0) AS video_season,
-            COALESCE(v.ctime, 0) AS video_ctime,
-            COALESCE(v.utime, 0) AS video_utime,
-            GREATEST(
-                COALESCE(v.ctime, 0),
-                COALESCE(v.utime, 0),
-                COALESCE(ph.max_play, 0),
-                COALESCE(fv.max_fav, 0),
-                COALESCE(c.utime, 0)
-            ) AS max_mtime,
-            MD5(
-                COALESCE(v.name, '') || '|' ||
-                COALESCE(v.release_date::text, '0') || '|' ||
-                COALESCE(v.country_list::text, '{}') || '|' ||
-                COALESCE(v.style_list::text, '{}') || '|' ||
-                COALESCE(v.score::text, '0') || '|' ||
-                COALESCE(v.introduction, '') || '|' ||
-                COALESCE(v.poster_path, '') || '|' ||
-                COALESCE(v.backdrop_path, '') || '|' ||
-                COALESCE(v.logo_path, '')
-            ) AS content_hash
-        FROM file_info f
-        LEFT JOIN ug_video_info v ON f.category_id = v.category_id
-        LEFT JOIN (
-            SELECT category_id, MAX(last_access_time) AS max_play
-            FROM play_history GROUP BY category_id
-        ) ph ON ph.category_id = f.category_id
-        LEFT JOIN (
-            SELECT once_id, MAX(create_time) AS max_fav
-            FROM favorites GROUP BY once_id
-        ) fv ON fv.once_id = f.category_id
-        LEFT JOIN ug_collection c ON c.collection_id = v.collection_id
-    """
-    params = []
-    if path_prefix:
-        sql += " WHERE f.folder_path LIKE %s"
-        params.append(path_prefix + "%")
-
-    sql += " ORDER BY f.folder_path"
-
-    records = []
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params)
-        for row in cur.fetchall():
-            records.append(FileRecord(**{
-                k: (v if v is not None else _default_file(k))
-                for k, v in row.items()
-            }))
-    return records
-
 
 def fetch_all_file_info_cursor(conn, path_prefix: str = "",
                                 batch_size: int = 500
@@ -112,6 +39,8 @@ def fetch_all_file_info_cursor(conn, path_prefix: str = "",
             COALESCE(v.season, 0) AS video_season,
             COALESCE(v.ctime, 0) AS video_ctime,
             COALESCE(v.utime, 0) AS video_utime,
+            v.collection_id AS video_collection_id,
+            COALESCE((SELECT COUNT(*) FROM favorites WHERE once_id = f.category_id), 0) AS fav_count,
             GREATEST(
                 COALESCE(v.ctime, 0),
                 COALESCE(v.utime, 0),
@@ -268,33 +197,15 @@ def fetch_individual_episode(conn, category_id: str, season_num: int,
 
 # ---- 字段默认值映射 ----
 
-_DB_DEFAULTS: dict[str, int | str | float | list] = {
-    "ug_video_info_id": 0, "category_id": "", "name": "",
-    "pinyin_first": "", "pinyin_full": "", "to9_digit": "",
-    "douban_id": 0, "tmdb_id": 0,
-    "score": 0.0, "year": 0, "season": 0,
-    "introduction": "", "country_list": [], "style_list": [],
-    "grading": 0, "release_date": 0, "last_release_date": 0,
-    "all_season_episode_num": 0,
-    "type": 0,
-    "poster_path": "", "backdrop_path": "", "logo_path": "",
-    "tagline": "", "no_lang_poster_path": "", "no_lang_backdrop_path": "",
-    "language": "", "old_category_id": "", "collection_id": "",
-    "collection_time": 0, "media_lib_set_id": 0,
-    "last_play_file_path": "", "jp_name": "", "ug_media_id": "",
-    "ctime": 0, "utime": 0,
-}
-
-
 def _default(key: str):
-    """RealDictCursor 返回的 None 值的默认值（显式映射，无启发式陷阱）"""
-    return _DB_DEFAULTS.get(key, "")
+    """RealDictCursor 返回的 None 值的默认值（派生自 DbRecord，单一来源）"""
+    return DB_DEFAULTS.get(key, "")
 
 
 def _default_file(key: str):
     """file_info 字段的默认值"""
     str_fields = {"file_name", "file_path", "folder_path", "category_id",
-                  "video_name", "content_hash"}
+                  "video_name", "content_hash", "video_collection_id"}
     if key in str_fields:
         return ""
     return 0

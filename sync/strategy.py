@@ -44,13 +44,16 @@ def decide_from_cache(db_ctime: int, db_utime: int,
                        cache_ctime: int, cache_utime: int,
                        db_vid: int = 0, cache_vid: int = 0,
                        db_mtime: int = 0, cache_mtime: int = 0,
-                       db_hash: str = "", cache_hash: str = "") -> SyncResult:
+                       db_hash: str = "", cache_hash: str = "",
+                       db_fav_count: int = 0, cache_fav_count: int = 0,
+                       db_collection_id: str = "", cache_collection_id: str = "") -> SyncResult:
     """
     cache 存在时的决策。
 
     cache.1: DB.ctime > cache.ctime 或 vid 变化 → JSON → DB  (重新刮削)
     cache.2: 以上无变化，但 max_mtime ≠ cache_max_mtime → DB → JSON  (用户行为，含删除)
     cache.4: 以上无变化，但 content_hash 变化 → DB → JSON  (编辑 ug_video_info)
+    cache.5: 以上无变化，但收藏数 / 合集 ID 变化 → DB → JSON  (收藏/合集增删)
     cache.3: 全部一致 → skip
     """
     result = SyncResult()
@@ -86,6 +89,14 @@ def decide_from_cache(db_ctime: int, db_utime: int,
             f"刷新 .ugreen.json"
         )
         log.debug("策略决策 cache.4: hash 变化 → DB→JSON")
+        return result
+
+    if db_fav_count != cache_fav_count or (db_collection_id or "") != (cache_collection_id or ""):
+        result.direction = "db_to_json"
+        result.scene = "cache.5"
+        result.message = "收藏/合集增删，刷新 .ugreen.json"
+        log.debug("策略决策 cache.5: fav_count=%d/%d 或 collection=%s/%s 变化 → DB→JSON",
+                  db_fav_count, cache_fav_count, db_collection_id, cache_collection_id)
         return result
 
     result.direction = "skip"

@@ -1,8 +1,9 @@
 """ugreen 扩展数据写入 — 全量写入 .ugreen.json，永不写入 NFO"""
 import os
+from dataclasses import fields as dc_fields
 from typing import Optional
 from config import log, DRY_RUN
-from models import DbRecord, PlayHistory, Favorite, Collection
+from models import DbRecord, PlayHistory, Favorite, Collection, Actor
 from utils import compute_file_hash
 from nfo import ugreen
 
@@ -12,11 +13,12 @@ def write_ugreen_from_db(video_dir: str, db: DbRecord,
                           db_favorites: list,
                           db_collection: Optional[dict],
                           old_ph_list: Optional[list] = None,
-                          old_nfo_snapshot: Optional[dict] = None):
+                          old_nfo_snapshot: Optional[dict] = None,
+                          db_actors: Optional[list] = None):
     """DB → .ugreen.json：全量写入扩展数据 + 官方字段备份"""
     record = _build_ugreen_record(db, db_play_history, db_favorites, db_collection,
                                    db.category_id, video_dir, old_ph_list,
-                                   old_nfo_snapshot)
+                                   old_nfo_snapshot, db_actors)
     if DRY_RUN:
         log.info("[DRY RUN] 将写入 .ugreen.json: %s", ugreen.ugreen_path(video_dir))
         return
@@ -27,7 +29,8 @@ def _build_ugreen_record(db: DbRecord, db_play_history: list,
                           db_favorites: list, db_collection: Optional[dict],
                           category_id: str, video_dir: str,
                           old_ph_list: Optional[list[PlayHistory]] = None,
-                          old_nfo_snapshot: Optional[dict] = None
+                          old_nfo_snapshot: Optional[dict] = None,
+                          db_actors: Optional[list] = None
                           ) -> ugreen.UgreenRecord:
     """从 DB 查询结果构建 UgreenRecord（全表字段写入）。
     若传入 old_ph_list（旧 .ugreen.json 的历史记录），合并新旧 play_history 并去重。
@@ -70,43 +73,21 @@ def _build_ugreen_record(db: DbRecord, db_play_history: list,
             utime=db_collection.get("utime", 0),
         )
 
+    # 演员：DB 原始 dict → Actor 列表（备份到 .ugreen.json）
+    actor_list = [
+        Actor(name=a.get("name", ""), role=a.get("role", ""),
+              tmdbid=a.get("tmdb_id", 0))
+        for a in (db_actors or [])
+    ]
+
+    # ug_video_info 全量字段：直接从 DbRecord 拷贝（单一来源，消除手写映射）
+    common = {f.name: getattr(db, f.name) for f in dc_fields(DbRecord)}
     return ugreen.UgreenRecord(
-        category_id=category_id or "",
-        ug_video_info_id=db.ug_video_info_id,
-        media_lib_set_id=db.media_lib_set_id,
-        ctime=db.ctime, utime=db.utime,
-        # ug_video_info 全量字段备份
-        name=db.name or "",
-        pinyin_first=db.pinyin_first or "",
-        pinyin_full=db.pinyin_full or "",
-        to9_digit=db.to9_digit or "",
-        year=db.year, season=db.season,
-        introduction=db.introduction or "",
-        score=db.score, douban_id=db.douban_id,
-        tmdb_id=db.tmdb_id,
-        style_list=db.style_list or [],
-        grading=db.grading,
-        release_date=db.release_date,
-        last_release_date=db.last_release_date,
-        all_season_episode_num=db.all_season_episode_num,
-        country_list=db.country_list or [],
-        type=db.type, use_nfo=db.use_nfo,
-        poster_path=db.poster_path or "",
-        backdrop_path=db.backdrop_path or "",
-        logo_path=db.logo_path or "",
-        tagline=db.tagline or "",
-        no_lang_poster_path=db.no_lang_poster_path or "",
-        no_lang_backdrop_path=db.no_lang_backdrop_path or "",
-        language=db.language or "",
-        old_category_id=db.old_category_id or "",
-        collection_id=db.collection_id or "",
-        collection_time=db.collection_time,
-        last_play_file_path=db.last_play_file_path or "",
-        jp_name=db.jp_name or "",
-        ug_media_id=db.ug_media_id or "",
-        # 扩展
+        **common,
+        # 扩展数据
         play_history=ph_list, favorites=fav_list,
-        collection=col_obj, nfo_snapshot=old_nfo_snapshot,
+        collection=col_obj, actors=actor_list,
+        nfo_snapshot=old_nfo_snapshot,
     )
 
 

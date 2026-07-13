@@ -7,7 +7,7 @@
 
 import json
 import os
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from typing import Optional
 from config import log
 from models import UgreenRecord
@@ -29,7 +29,10 @@ def read_ugreen(video_dir: str) -> Optional[UgreenRecord]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        data.pop("genre", None)  # 旧 JSON 兼容：genre 已删除
+        # 容错：过滤 UgreenRecord 不认识的键，避免 .ugreen.json 格式漂移
+        # （多一个字段/改名）时整条记录因 TypeError 被吞掉、静默跳过恢复
+        known = {f.name for f in fields(UgreenRecord)}
+        data = {k: v for k, v in data.items() if k in known}
         record = UgreenRecord(**data)
         log.debug("读取 .ugreen.json: %s (cat=%s)", path, record.category_id)
         return record

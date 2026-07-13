@@ -36,6 +36,9 @@ class NfoChangeHandler(FileSystemEventHandler):
     def on_moved(self, event):
         if not event.is_directory and event.dest_path.endswith(".nfo"):
             self._mark_pending(event.dest_path)
+            # 旧路径也登记，确保原位置的缓存/数据被重新评估
+            if event.src_path.endswith(".nfo"):
+                self._mark_pending(event.src_path)
 
     def _mark_pending(self, nfo_path: str):
         with self._lock:
@@ -121,13 +124,8 @@ class Watcher:
 
             # SQLite 单条查询，替代全量 load
             try:
-                os.makedirs(os.path.dirname(st._DB_PATH), exist_ok=True)
-                _sqlite_conn = sqlite3.connect(st._DB_PATH)
+                _sqlite_conn = st.open_db()
                 try:
-                    _sqlite_conn.execute(
-                        "CREATE TABLE IF NOT EXISTS sync_cache "
-                        "(category_id TEXT PRIMARY KEY, data TEXT NOT NULL)"
-                    )
                     row = _sqlite_conn.execute(
                         "SELECT 1 FROM sync_cache WHERE category_id = ?", (cat,)
                     ).fetchone()
@@ -137,7 +135,6 @@ class Watcher:
                 log.warning("Watchdog: 缓存查询失败 %s: %s", nfo_path, e)
                 return
             if not row:
-                log.debug("Watchdog: category_id=%s 不在缓存中，跳过 (需先运行一次定时同步建立缓存)", cat)
                 log.info("Watchdog: category_id=%s 不在缓存中，跳过 (需先运行一次定时同步建立缓存)", cat)
                 return
 
@@ -197,25 +194,36 @@ class Watcher:
                 # 写入 DB：仅 14 个保护字段来自 .ugreen.json，NFO 字段不写 DB
                 db_sync.sync_nfo_to_db(conn, nfo)
 
-                # 用户编辑 NFO → 用文件 mtime 作为 utime
-                nfo_mtime = int(os.path.getmtime(nfo_path))
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE ug_video_info SET utime = %s WHERE category_id = %s",
-                        (nfo_mtime, cat),
-                    )
-                conn.commit()
+                # 用户编辑 NFO → 用文件 mtime 作为 utime；NFO 已删除则跳过 mtime 相关写入
+                if os.path.exists(nfo_path):
+                    nfo_mtime = int(os.path.getmtime(nfo_path))
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE ug_video_info SET utime = %s WHERE category_id = %s",
+                            (nfo_mtime, cat),
+                        )
+                    conn.commit()
 
-                resolved_cat = cat
-                fresh = queries.fetch_video_by_category(conn, resolved_cat)
-                if fresh:
-                    st.update_cache(resolved_cat, fresh.ctime, nfo_mtime, cache,
-                                    db_vid=fresh.ug_video_info_id, max_mtime=nfo_mtime)
+                    resolved_cat = cat
+                    fresh = queries.fetch_video_by_category(conn, resolved_cat)
+                    try:
+                        _sc = st.open_db()
+                        st.upsert_one(
+                            _sc, resolved_cat,
+                            fresh.ctime if fresh else 0, nfo_mtime,
+                            db_vid=fresh.ug_video_info_id if fresh else 0,
+                            max_mtime=nfo_mtime,
+                        )
+                        _sc.commit()
+                    except (sqlite3.DatabaseError, OSError) as e:
+                        log.warning("Watchdog: 缓存更新失败 %s: %s", nfo_path, e)
+                    finally:
+                        _sc.close()
+                    log.debug("Watchdog: 完成 %s (cat=%s utime=%d)",
+                             os.path.basename(nfo_path), resolved_cat, nfo_mtime)
                 else:
-                    st.update_cache(resolved_cat, 0, nfo_mtime, cache)
-                st.save(cache)
-                log.debug("Watchdog: 完成 %s (cat=%s utime=%d)",
-                         os.path.basename(nfo_path), resolved_cat, nfo_mtime)
+                    log.debug("Watchdog: NFO 已删除，跳过 mtime 更新与缓存写入 %s",
+                             nfo_path)
             except Exception:
                 conn.rollback()
                 log.error("Watchdog: DB 操作失败 %s", nfo_path, exc_info=True)

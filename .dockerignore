@@ -1,0 +1,7 @@
+.workbuddy
+data
+__pycache__
+*.pyc
+.git
+.gitignore
+docker-compose.yml

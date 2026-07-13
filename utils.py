@@ -1,5 +1,6 @@
 """通用工具函数 — 纯函数，无项目依赖"""
 
+import calendar
 import datetime
 import hashlib
 
@@ -36,19 +37,19 @@ def mpaa_to_int(mpaa: str) -> int:
 # ---- 日期转换 (Unix 时间戳 ↔ 'YYYY-MM-DD') ----
 
 def int_to_date_str(timestamp: int) -> str:
-    """Unix 时间戳 → 'YYYY-MM-DD'"""
+    """Unix 时间戳 → 'YYYY-MM-DD'（统一 UTC，避免跨时区差一天）"""
     if not timestamp or timestamp <= 0:
         return ""
-    return datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
+    return datetime.datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d")
 
 
 def date_str_to_int(date_str: str) -> int:
-    """'YYYY-MM-DD' → Unix 时间戳"""
+    """'YYYY-MM-DD' → Unix 时间戳（统一 UTC 零点，与 int_to_date_str 对称）"""
     if not date_str:
         return 0
     try:
         dt = datetime.datetime.strptime(date_str[:10], "%Y-%m-%d")
-        return int(dt.timestamp())
+        return int(calendar.timegm(dt.timetuple()))
     except ValueError:
         return 0
 

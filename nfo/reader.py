@@ -5,7 +5,7 @@ import re
 import xml.etree.ElementTree as ET
 from typing import Optional
 from config import log
-from models import NfoRecord, VideoMeta, Actor
+from models import NfoRecord, VideoMeta
 
 
 def read_nfo(nfo_path: str) -> Optional[NfoRecord]:
@@ -39,10 +39,19 @@ def read_nfo(nfo_path: str) -> Optional[NfoRecord]:
 
 
 def find_nfo_in_dir(dir_path: str) -> Optional[str]:
-    """在目录下查找任意 .nfo 文件，返回第一个匹配的路径。"""
+    """在目录下查找 NFO：优先 <目录名>.nfo（避免误选 extras/sample），其次大小写不敏感回退。"""
     if not os.path.isdir(dir_path):
         return None
-    files = glob.glob(os.path.join(dir_path, "*.nfo"))
+    # 优先精确匹配 <目录名>.nfo（标准命名）
+    base = os.path.basename(os.path.normpath(dir_path))
+    exact = os.path.join(dir_path, base + ".nfo")
+    if os.path.isfile(exact):
+        return exact
+    # 大小写不敏感回退（Linux 下 .NFO 会被 glob("*.nfo") 漏掉）
+    files = sorted(
+        p for p in glob.glob(os.path.join(dir_path, "*.[nN][fF][oO]"))
+        if os.path.isfile(p)
+    )
     return files[0] if files else None
 
 
@@ -62,12 +71,24 @@ def _text(el, tag: str) -> Optional[str]:
 
 def _int_text(el, tag: str) -> Optional[int]:
     v = _text(el, tag)
-    return int(v) if v else None
+    if not v:
+        return None
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        log.warning("NFO 字段 %s 非整数: %r，忽略", tag, v)
+        return None
 
 
 def _float_text(el, tag: str) -> Optional[float]:
     v = _text(el, tag)
-    return float(v) if v else None
+    if not v:
+        return None
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        log.warning("NFO 字段 %s 非数值: %r，忽略", tag, v)
+        return None
 
 
 def _parse_official(root: ET.Element, meta: VideoMeta, present: set[str]):
@@ -89,13 +110,3 @@ def _parse_official(root: ET.Element, meta: VideoMeta, present: set[str]):
     meta.episode = _int_text(root, "episode") or 0
     meta.seasonnumber = _int_text(root, "seasonnumber") or 0
     meta.all_season_episode_num = _int_text(root, "all_season_episode_num") or 0
-
-    actor_els = root.findall("actor")
-    if actor_els:
-        present.add("actor")
-    for a_el in actor_els:
-        meta.actors.append(Actor(
-            name=_text(a_el, "name") or "",
-            role=_text(a_el, "role") or "",
-            tmdbid=_int_text(a_el, "tmdbid") or 0,
-        ))
