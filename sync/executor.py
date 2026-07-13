@@ -48,8 +48,12 @@ def run_sync():
                     continue
                 seen_cats.add(fr.category_id)
                 _progress_count += 1
-                if _progress_count % 10000 == 0:
-                    log.info("进度: %d 条", _progress_count)
+                if _progress_count % 1000 == 0:
+                    log.info("进度: %d 条  NFO→DB:%d  DB→JSON:%d  跳过:%d",
+                             _progress_count,
+                             stats.get("nfo_to_db", 0),
+                             stats.get("db_to_json", 0),
+                             stats.get("cached", 0))
 
                 # 电视剧
                 if fr.video_type == 2:
@@ -399,8 +403,8 @@ def _update_cache(cache: dict, fr: FileRecord):
 def _log_summary(stats: dict):
     log.info("======== 同步汇总 ========")
     log.info("  缓存跳过: %d", stats.get("cached", 0))
-    log.info("  NFO/JSON → DB: %d", stats.get("nfo_to_db", 0))
-    log.info("  DB → JSON: %d", stats.get("db_to_json", 0))
+    log.info("  NFO/JSON → DB  : %d", stats.get("nfo_to_db", 0))
+    log.info("  DB       → JSON: %d", stats.get("db_to_json", 0))
     error_count = stats.get("error", 0)
     if error_count:
         log.warning("  错误:     %d", error_count)
