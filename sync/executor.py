@@ -1,5 +1,6 @@
 """同步执行器 — 遍历 file_info 表，cache 不存在/存在两种决策路径"""
 import os
+from dataclasses import fields as dc_fields
 from config import log, DRY_RUN, TARGET_PATH
 from db import queries, sync as db_sync
 from db.connection import connect
@@ -8,7 +9,7 @@ from nfo.reader import read_nfo
 from nfo.writer import write_ugreen_from_db
 from sync.strategy import decide_first_sync, decide_from_cache
 from models import NfoRecord, VideoMeta, FileRecord
-from models import UgreenRecord, PlayHistory, Favorite, Collection, Actor, USER_EDITABLE_FIELDS
+from models import DbRecord, UgreenRecord, PlayHistory, Favorite, Collection, Actor
 import state as st
 
 
@@ -251,14 +252,7 @@ def _restore_tv_from_ugreen(conn, ug, folder: str, cat_changed: bool = False):
         from utils import fix_paths_for_video_dir
         fix_paths_for_video_dir(ug, folder, cat_changed=True)
     # 仅还原用户在 NAS UI 可编辑的字段（USER_EDITABLE_FIELDS）；其余仅备份不还原
-    cols = list(USER_EDITABLE_FIELDS)
-    set_clause = ", ".join(f"{c} = %s" for c in cols)
-    params = [getattr(ug, c) for c in cols] + [ug.category_id]
-    with conn.cursor() as cur:
-        cur.execute(
-            f"UPDATE ug_video_info SET {set_clause} WHERE category_id = %s",
-            params,
-        )
+    db_sync._update_user_editable(conn, ug, ug.category_id)
     for ep in ug.episodes:
         with conn.cursor() as cur:
             cur.execute(
@@ -329,41 +323,10 @@ def _dump_tv_to_ugreen(conn, category_id: str, folder: str):
             cloud_id=col.get("cloud_id", ""), ctime=col.get("ctime", 0), utime=col.get("utime", 0),
         )
 
+    # ug_video_info 全量字段：直接从 DbRecord 拷贝（单一来源，消除手写映射）
+    common = {f.name: getattr(db_rec, f.name) for f in dc_fields(DbRecord)}
     record = UgreenRecord(
-        category_id=category_id,
-        ug_video_info_id=db_rec.ug_video_info_id,
-        media_lib_set_id=db_rec.media_lib_set_id,
-        ctime=db_rec.ctime, utime=db_rec.utime,
-        # ug_video_info 全量字段备份
-        name=db_rec.name or "",
-        pinyin_first=db_rec.pinyin_first or "",
-        pinyin_full=db_rec.pinyin_full or "",
-        to9_digit=db_rec.to9_digit or "",
-        year=db_rec.year, season=db_rec.season,
-        introduction=db_rec.introduction or "",
-        score=db_rec.score,
-        douban_id=db_rec.douban_id, tmdb_id=db_rec.tmdb_id,
-        style_list=db_rec.style_list or [],
-        grading=db_rec.grading,
-        release_date=db_rec.release_date,
-        last_release_date=db_rec.last_release_date,
-        all_season_episode_num=db_rec.all_season_episode_num,
-        country_list=db_rec.country_list or [],
-        type=db_rec.type, use_nfo=db_rec.use_nfo,
-        poster_path=db_rec.poster_path or "",
-        backdrop_path=db_rec.backdrop_path or "",
-        logo_path=db_rec.logo_path or "",
-        tagline=db_rec.tagline or "",
-        no_lang_poster_path=db_rec.no_lang_poster_path or "",
-        no_lang_backdrop_path=db_rec.no_lang_backdrop_path or "",
-        language=db_rec.language or "",
-        old_category_id=db_rec.old_category_id or "",
-        collection_id=db_rec.collection_id or "",
-        collection_time=db_rec.collection_time,
-        last_play_file_path=db_rec.last_play_file_path or "",
-        jp_name=db_rec.jp_name or "",
-        ug_media_id=db_rec.ug_media_id or "",
-        # 扩展
+        **common,
         episodes=eps, play_history=ph_list,
         favorites=fav_list, collection=col_obj, actors=actor_list,
         nfo_snapshot=old_snap,

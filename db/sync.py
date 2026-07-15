@@ -9,6 +9,22 @@ from models import PlayHistory, Favorite, Collection, USER_EDITABLE_FIELDS
 from utils import compute_file_hash
 
 
+# ---- 共享更新辅助 ----
+
+def _update_user_editable(conn, ug, cat: str):
+    """用 .ugreen.json 中的用户可编辑字段更新 DB 对应行。
+    供 sync_nfo_to_db 和 _restore_tv_from_ugreen 共用。
+    """
+    cols = list(USER_EDITABLE_FIELDS)
+    set_clause = ", ".join(f"{c} = %s" for c in cols)
+    params = [getattr(ug, c) for c in cols] + [cat]
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE ug_video_info SET {set_clause} WHERE category_id = %s",
+            params,
+        )
+
+
 # ---- .ugreen.json → DB 恢复 ----
 
 def sync_nfo_to_db(conn, nfo: "NfoRecord") -> int:
@@ -32,15 +48,8 @@ def sync_nfo_to_db(conn, nfo: "NfoRecord") -> int:
 
     # 仅还原用户在 NAS UI 可编辑的字段（USER_EDITABLE_FIELDS）；
     # 其余字段仅写入 .ugreen.json 备份，恢复时不回写，避免旧备份覆盖 DB 新刮削值
-    cols = list(USER_EDITABLE_FIELDS)
-    set_clause = ", ".join(f"{c} = %s" for c in cols)
-    params = [getattr(ug, c) for c in cols] + [cat]
-    with conn.cursor() as cur:
-        cur.execute(
-            f"UPDATE ug_video_info SET {set_clause} WHERE category_id = %s",
-            params,
-        )
-        log.debug("sync_nfo_to_db: UPDATE 用户可编辑字段 cat=%s", cat)
+    _update_user_editable(conn, ug, cat)
+    log.debug("sync_nfo_to_db: UPDATE 用户可编辑字段 cat=%s", cat)
 
     # 扩展数据回写
     if ug.play_history:
@@ -176,43 +185,22 @@ def _match_file_info(ph: PlayHistory, candidates: list[dict], nfo_prefix: str) -
 # ---- 收藏 ----
 
 def upsert_favorites(conn, category_id: str, items: list[Favorite]):
-    """按 uid + once_id 批量匹配"""
+    """按 (uid, once_id) 唯一约束，ON CONFLICT 批量写入，消除读改写反模式"""
     if not items:
         return
-    uids = [fav.uid for fav in items]
-
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT uid FROM favorites WHERE once_id = %s AND uid = ANY(%s)",
-            (category_id, uids),
+        psycopg2.extras.execute_values(
+            cur,
+            """INSERT INTO favorites (uid, once_id, favorites_type, create_time)
+               VALUES %s
+               ON CONFLICT (uid, once_id)
+               DO UPDATE SET
+                 favorites_type = EXCLUDED.favorites_type,
+                 create_time = EXCLUDED.create_time""",
+            [(fav.uid, category_id, fav.favorites_type, fav.create_time)
+             for fav in items],
         )
-        existing = {row[0] for row in cur.fetchall()}
-
-    updates = [fav for fav in items if fav.uid in existing]
-    inserts = [fav for fav in items if fav.uid not in existing]
-
-    log.debug("upsert_favorites: cat=%s updates=%d inserts=%d",
-              category_id, len(updates), len(inserts))
-
-    if updates:
-        with conn.cursor() as cur:
-            cur.executemany(
-                """UPDATE favorites SET favorites_type = %(ft)s, create_time = %(ct)s
-                   WHERE once_id = %(once)s AND uid = %(uid)s""",
-                [{"ft": fav.favorites_type, "ct": fav.create_time,
-                  "once": category_id, "uid": fav.uid}
-                 for fav in updates],
-            )
-
-    if inserts:
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_values(
-                cur,
-                """INSERT INTO favorites (uid, once_id, favorites_type, create_time)
-                   VALUES %s""",
-                [(fav.uid, category_id, fav.favorites_type, fav.create_time)
-                 for fav in inserts],
-            )
+    log.debug("upsert_favorites: 写入 %d 条 cat=%s", len(items), category_id)
 
 
 # ---- 合集 ----

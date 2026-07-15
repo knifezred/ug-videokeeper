@@ -17,7 +17,7 @@ def write_ugreen_from_db(video_dir: str, db: DbRecord,
                           db_actors: Optional[list] = None):
     """DB → .ugreen.json：全量写入扩展数据 + 官方字段备份"""
     record = _build_ugreen_record(db, db_play_history, db_favorites, db_collection,
-                                   db.category_id, video_dir, old_ph_list,
+                                   video_dir, old_ph_list,
                                    old_nfo_snapshot, db_actors)
     if DRY_RUN:
         log.info("[DRY RUN] 将写入 .ugreen.json: %s", ugreen.ugreen_path(video_dir))
@@ -27,7 +27,7 @@ def write_ugreen_from_db(video_dir: str, db: DbRecord,
 
 def _build_ugreen_record(db: DbRecord, db_play_history: list,
                           db_favorites: list, db_collection: Optional[dict],
-                          category_id: str, video_dir: str,
+                          video_dir: str,
                           old_ph_list: Optional[list[PlayHistory]] = None,
                           old_nfo_snapshot: Optional[dict] = None,
                           db_actors: Optional[list] = None

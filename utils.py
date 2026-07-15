@@ -3,6 +3,7 @@
 import calendar
 import datetime
 import hashlib
+from config import log
 
 
 # ---- 文件哈希 ----
@@ -58,24 +59,79 @@ def date_str_to_int(date_str: str) -> int:
 
 import os as _os
 
-_IMAGE_FIELDS = ("poster_path", "backdrop_path", "logo_path",
-                 "no_lang_poster_path", "no_lang_backdrop_path")
+_IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+
+# 每个字段在新目录中搜索的文件名前缀
+_IMG_SEARCH = {
+    "poster_path":               ("poster", "folder", "cover"),
+    "backdrop_path":             ("backdrop", "background", "fanart"),
+    "logo_path":                 ("logo", "clearlogo"),
+    "no_lang_poster_path":       ("poster", "folder", "cover"),
+    "no_lang_backdrop_path":     ("backdrop", "background", "fanart"),
+}
+
+
+def _find_img_in_dir(video_dir: str, prefixes: tuple[str, ...]) -> str | None:
+    """在 video_dir 根查找图片，优先精确前缀匹配，回退到包含匹配。"""
+    try:
+        entries = _os.listdir(video_dir)
+    except OSError:
+        return None
+
+    def _match(mode):
+        """mode='startswith' 优先；mode='in' 兜底"""
+        for f in entries:
+            f_lower = f.lower()
+            if not f_lower.endswith(_IMG_EXTS):
+                continue
+            for p in prefixes:
+                if mode == "startswith" and f_lower.startswith(p):
+                    return _os.path.join(video_dir, f)
+                if mode == "in" and p in f_lower:
+                    return _os.path.join(video_dir, f)
+        return None
+
+    # 第一轮：精确前缀匹配（poster.jpg → yes, abc-poster.jpg → no）
+    found = _match("startswith")
+    if found:
+        return found
+    # 第二轮：包含匹配（abc-poster.jpg → yes）
+    return _match("in")
 
 
 def fix_paths_for_video_dir(ug, video_dir: str, cat_changed: bool = False):
-    """当文件夹移动后，修正图片路径到新目录。
-    仅处理本地绝对路径（/ 开头且不是 http），且不含 @appstore/com.ugreen.videomgr。
-    cat_changed=False 时不执行修正。
+    """当文件夹移动后，在新目录中查找海报/背景图并修正路径。
+
+    - 仅对旧路径以 / 开头且不含 @appstore 的字段做修正
+      （@appstore 由绿联管理，不随视频目录移动）
+    - 在新目录根搜索常见命名（poster.* / backdrop.* / logo.* 等）
+    - cat_changed=False 时不执行
     """
     if not cat_changed:
+        log.debug("fix_paths: cat_changed=False, 跳过")
         return
-    for attr in _IMAGE_FIELDS:
+
+    for attr in _IMG_SEARCH:
         old = getattr(ug, attr, None)
-        if not old or not old.startswith("/") or old.startswith("http"):
+        log.debug("fix_paths: %s = %r", attr, old)
+
+        # 有值但不是 / 开头 → 跳过（如 http / 相对路径）
+        # 空值/None 则继续走搜索，看目录下有没有图
+        if old and not old.startswith("/"):
+            log.debug("fix_paths:   → 跳过（非 / 开头）")
             continue
-        if "@appstore/com.ugreen.videomgr" in old:
+
+        # 绿联托管路径 → 不动（不随文件夹搬移）
+        if old and "@appstore/com.ugreen.videomgr" in old:
+            log.debug("fix_paths:   → 跳过（@appstore 管理路径）")
             continue
-        basename = _os.path.basename(old)
-        new_path = _os.path.join(video_dir, basename)
-        if new_path != old and _os.path.isfile(new_path):
+
+        # 在新目录搜索对应前缀的图片
+        new_path = _find_img_in_dir(video_dir, _IMG_SEARCH[attr])
+        if new_path and new_path != old:
+            log.debug("fix_paths:   → 更新为 %s", new_path)
             setattr(ug, attr, new_path)
+        elif new_path:
+            log.debug("fix_paths:   → 相同路径，不做变更")
+        else:
+            log.debug("fix_paths:   → 新目录未找到匹配图片")

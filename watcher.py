@@ -9,6 +9,7 @@ from watchdog.events import FileSystemEventHandler
 from config import log, WATCHDOG_DEBOUNCE
 from db.connection import connect
 from db import queries, sync as db_sync
+from models import NfoRecord, VideoMeta
 from nfo.reader import read_nfo
 from nfo import ugreen
 import state as st
@@ -139,7 +140,6 @@ class Watcher:
                 return
 
             # 读取 NFO 官方字段（仅当事件源是 .nfo 时）
-            from models import NfoRecord, VideoMeta
             nfo = read_nfo(nfo_path) if nfo_path.endswith(".nfo") else None
             if nfo is None:
                 # NFO 可能损坏，但 .ugreen.json 还在 → 创建最小骨架用于同步
