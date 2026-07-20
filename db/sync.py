@@ -41,10 +41,9 @@ def sync_nfo_to_db(conn, nfo: "NfoRecord") -> int:
         log.warning("sync_nfo_to_db: 无 category_id, 跳过")
         return 0
 
-    # category_id 变化 → 目录可能移动 → 修正图片路径
-    if cat != ug.category_id:
-        from utils import fix_paths_for_video_dir
-        fix_paths_for_video_dir(ug, nfo.video_dir, cat_changed=True)
+    # 目录移动 → 修正图片路径（新目录下搜索海报）
+    from utils import fix_paths_for_video_dir
+    fix_paths_for_video_dir(ug, nfo.video_dir)
 
     # 仅还原用户在 NAS UI 可编辑的字段（USER_EDITABLE_FIELDS）；
     # 其余字段仅写入 .ugreen.json 备份，恢复时不回写，避免旧备份覆盖 DB 新刮削值
@@ -55,7 +54,7 @@ def sync_nfo_to_db(conn, nfo: "NfoRecord") -> int:
     if ug.play_history:
         log.debug("sync_nfo_to_db: 写入 %d 条播放记录 cat=%s", len(ug.play_history), cat)
         upsert_play_history(conn, ug.play_history,
-                            nfo.video_dir, os.path.basename(nfo.nfo_path))
+                            nfo.video_dir, os.path.basename(nfo.nfo_path), cat)
     if ug.favorites:
         log.debug("sync_nfo_to_db: 写入 %d 条收藏 cat=%s", len(ug.favorites), cat)
         upsert_favorites(conn, cat, ug.favorites)
@@ -73,8 +72,10 @@ def sync_nfo_to_db(conn, nfo: "NfoRecord") -> int:
 # ---- 播放记录 ----
 
 def upsert_play_history(conn, items: list[PlayHistory],
-                        video_dir: str, nfo_filename: str):
+                        video_dir: str, nfo_filename: str,
+                        category_id: str = ""):
     """三级匹配定位 file_info：hash_fingerprint → file_name+folder → folder+prefix。
+    若 folder_path 直接查不到，用 category_id 兜底。
     每条播放记录独立匹配，匹配到则写入对应 file_id，否则跳过。
     """
     if not items:
@@ -82,6 +83,7 @@ def upsert_play_history(conn, items: list[PlayHistory],
 
     nfo_prefix = os.path.splitext(nfo_filename)[0].lower() if nfo_filename else ""
 
+    # 先按 folder_path 查
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """SELECT f.file_id, f.category_id, f.file_name, f.folder_path,
@@ -93,6 +95,22 @@ def upsert_play_history(conn, items: list[PlayHistory],
             (video_dir,),
         )
         candidates = cur.fetchall()
+
+    # folder_path 匹配不到 → 用 category_id 兜底
+    if not candidates and category_id:
+        log.warning("upsert_play_history: folder=%s 查不到 file_info，改用 category_id=%s 兜底",
+                     video_dir, category_id)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT f.file_id, f.category_id, f.file_name, f.folder_path,
+                          f.hash_fingerprint,
+                          COALESCE(v.ug_video_info_id, 0) AS vid
+                   FROM file_info f
+                   LEFT JOIN ug_video_info v ON f.category_id = v.category_id
+                   WHERE f.category_id = %s""",
+                (category_id,),
+            )
+            candidates = cur.fetchall()
 
     if not candidates:
         log.warning("upsert_play_history: folder=%s 未匹配到 file_info", video_dir)

@@ -99,18 +99,12 @@ def _find_img_in_dir(video_dir: str, prefixes: tuple[str, ...]) -> str | None:
     return _match("in")
 
 
-def fix_paths_for_video_dir(ug, video_dir: str, cat_changed: bool = False):
-    """当文件夹移动后，在新目录中查找海报/背景图并修正路径。
-
-    - 仅对旧路径以 / 开头且不含 @appstore 的字段做修正
-      （@appstore 由绿联管理，不随视频目录移动）
-    - 在新目录根搜索常见命名（poster.* / backdrop.* / logo.* 等）
-    - cat_changed=False 时不执行
+def fix_paths_for_video_dir(ug, video_dir: str):
+    """当目录移动后，修正图片路径到新目录。
+    - 旧路径指向的目录与视频目录不一致 → 修正目录部分
+    - 在新目录根搜索常见命名图片（poster.* / backdrop.* 等）
+    - @appstore 路径不动
     """
-    if not cat_changed:
-        log.debug("fix_paths: cat_changed=False, 跳过")
-        return
-
     for attr in _IMG_SEARCH:
         old = getattr(ug, attr, None)
         log.debug("fix_paths: %s = %r", attr, old)
@@ -126,12 +120,21 @@ def fix_paths_for_video_dir(ug, video_dir: str, cat_changed: bool = False):
             log.debug("fix_paths:   → 跳过（@appstore 管理路径）")
             continue
 
-        # 在新目录搜索对应前缀的图片
+        # 第一步：旧路径目录与视频目录不一致 → 修正目录部分
+        if old:
+            old_dir = _os.path.dirname(old)
+            if old_dir != video_dir:
+                corrected = _os.path.join(video_dir, _os.path.basename(old))
+                log.debug("fix_paths:   → 目录不一致 %r → %r", old, corrected)
+                setattr(ug, attr, corrected)
+                old = corrected  # 让接下来的搜索继续基于修正后的路径
+
+        # 第二步：在新目录搜索对应前缀的图片（比目录修正更精准）
         new_path = _find_img_in_dir(video_dir, _IMG_SEARCH[attr])
         if new_path and new_path != old:
-            log.debug("fix_paths:   → 更新为 %s", new_path)
+            log.debug("fix_paths:   → 搜索命中，更新为 %s", new_path)
             setattr(ug, attr, new_path)
         elif new_path:
-            log.debug("fix_paths:   → 相同路径，不做变更")
+            log.debug("fix_paths:   → 搜索命中，与当前路径相同")
         else:
             log.debug("fix_paths:   → 新目录未找到匹配图片")

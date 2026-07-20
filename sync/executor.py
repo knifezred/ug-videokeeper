@@ -221,7 +221,7 @@ def _process_tv(conn, fr: FileRecord, folder: str,
             if ug:
                 cat_changed = (ug.category_id != fr.category_id)
                 ug.category_id = fr.category_id  # 优先用 file_info 最新值
-                _restore_tv_from_ugreen(conn, ug, folder, cat_changed=cat_changed)
+                _restore_tv_from_ugreen(conn, ug, folder)
                 stats["nfo_to_db"] = stats.get("nfo_to_db", 0) + 1
             else:
                 stats["error"] = stats.get("error", 0) + 1
@@ -246,11 +246,10 @@ def _process_tv(conn, fr: FileRecord, folder: str,
     _update_cache(cache, fr)
 
 
-def _restore_tv_from_ugreen(conn, ug, folder: str, cat_changed: bool = False):
+def _restore_tv_from_ugreen(conn, ug, folder: str):
     """.ugreen.json → DB：ug_video_info 全字段回写 + 剧集 + 扩展数据"""
-    if cat_changed:
-        from utils import fix_paths_for_video_dir
-        fix_paths_for_video_dir(ug, folder, cat_changed=True)
+    from utils import fix_paths_for_video_dir
+    fix_paths_for_video_dir(ug, folder)
     # 仅还原用户在 NAS UI 可编辑的字段（USER_EDITABLE_FIELDS）；其余仅备份不还原
     db_sync._update_user_editable(conn, ug, ug.category_id)
     for ep in ug.episodes:
@@ -270,7 +269,7 @@ def _restore_tv_from_ugreen(conn, ug, folder: str, cat_changed: bool = False):
                  ep.get("ug_television_episode_id", 0)),
             )
     if ug.play_history:
-        db_sync.upsert_play_history(conn, ug.play_history, folder, "")
+        db_sync.upsert_play_history(conn, ug.play_history, folder, "", ug.category_id)
     if ug.favorites:
         db_sync.upsert_favorites(conn, ug.category_id, ug.favorites)
     if ug.collection and ug.collection.name:
