@@ -167,7 +167,7 @@ def fetch_collection(conn, category_id: str) -> Optional[dict]:
 def fetch_episodes(conn, category_id: str) -> list[dict]:
     """查询某电视剧的所有剧集"""
     sql = """
-        SELECT ug_television_episode_id, season, episode,
+        SELECT ug_television_episode_id, category_id, season, episode,
                name, overview, cover_path, language, episode_flag,
                ctime, utime, media_lib_set_id
         FROM ug_television_episode
@@ -179,19 +179,6 @@ def fetch_episodes(conn, category_id: str) -> list[dict]:
         return cur.fetchall()
 
 
-def fetch_individual_episode(conn, category_id: str, season_num: int,
-                              episode_num: int) -> Optional[dict]:
-    """查询单集全部数据"""
-    sql = """
-        SELECT ug_television_episode_id, season, episode,
-               name, overview, cover_path, language,
-               ctime, utime, media_lib_set_id
-        FROM ug_television_episode
-        WHERE category_id = %s AND season = %s AND episode = %s
-    """
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, (category_id, season_num, episode_num))
-        return cur.fetchone()
 
 
 # ---- 字段默认值映射 ----

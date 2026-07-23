@@ -1,5 +1,4 @@
 """NFO 文件读取 — 解析标准字段，不再解析 <ugreen>（数据来自 .ugreen.json）"""
-import glob
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -37,22 +36,6 @@ def read_nfo(nfo_path: str) -> Optional[NfoRecord]:
         official_fields_present=present,
     )
 
-
-def find_nfo_in_dir(dir_path: str) -> Optional[str]:
-    """在目录下查找 NFO：优先 <目录名>.nfo（避免误选 extras/sample），其次大小写不敏感回退。"""
-    if not os.path.isdir(dir_path):
-        return None
-    # 优先精确匹配 <目录名>.nfo（标准命名）
-    base = os.path.basename(os.path.normpath(dir_path))
-    exact = os.path.join(dir_path, base + ".nfo")
-    if os.path.isfile(exact):
-        return exact
-    # 大小写不敏感回退（Linux 下 .NFO 会被 glob("*.nfo") 漏掉）
-    files = sorted(
-        p for p in glob.glob(os.path.join(dir_path, "*.[nN][fF][oO]"))
-        if os.path.isfile(p)
-    )
-    return files[0] if files else None
 
 
 # ---- internal parse helpers ----

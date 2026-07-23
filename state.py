@@ -35,23 +35,6 @@ def _get_conn() -> sqlite3.Connection:
     return open_db()
 
 
-def load() -> dict:
-    """（兼容旧接口）全量加载缓存。百万级库请改用 get_one / load_batch"""
-    conn = _get_conn()
-    rows = conn.execute("SELECT category_id, data FROM sync_cache").fetchall()
-    conn.close()
-    return {row[0]: json.loads(row[1]) for row in rows}
-
-
-def save(state: dict):
-    """（兼容旧接口）全量保存缓存到 SQLite"""
-    conn = _get_conn()
-    conn.executemany(
-        "INSERT OR REPLACE INTO sync_cache (category_id, data) VALUES (?, ?)",
-        [(cat, json.dumps(val, ensure_ascii=False)) for cat, val in state.items()]
-    )
-    conn.commit()
-    conn.close()
 
 
 def get_one(conn: sqlite3.Connection, category_id: str) -> dict | None:

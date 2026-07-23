@@ -14,11 +14,13 @@ def write_ugreen_from_db(video_dir: str, db: DbRecord,
                           db_collection: Optional[dict],
                           old_ph_list: Optional[list] = None,
                           old_nfo_snapshot: Optional[dict] = None,
-                          db_actors: Optional[list] = None):
+                          db_actors: Optional[list] = None,
+                          episodes: Optional[list] = None):
     """DB → .ugreen.json：全量写入扩展数据 + 官方字段备份"""
     record = _build_ugreen_record(db, db_play_history, db_favorites, db_collection,
                                    video_dir, old_ph_list,
-                                   old_nfo_snapshot, db_actors)
+                                   old_nfo_snapshot, db_actors,
+                                   episodes=episodes)
     if DRY_RUN:
         log.info("[DRY RUN] 将写入 .ugreen.json: %s", ugreen.ugreen_path(video_dir))
         return
@@ -30,10 +32,12 @@ def _build_ugreen_record(db: DbRecord, db_play_history: list,
                           video_dir: str,
                           old_ph_list: Optional[list[PlayHistory]] = None,
                           old_nfo_snapshot: Optional[dict] = None,
-                          db_actors: Optional[list] = None
+                          db_actors: Optional[list] = None,
+                          episodes: Optional[list] = None
                           ) -> ugreen.UgreenRecord:
     """从 DB 查询结果构建 UgreenRecord（全表字段写入）。
     若传入 old_ph_list（旧 .ugreen.json 的历史记录），合并新旧 play_history 并去重。
+    episodes 参数支持电视剧数据。
     """
     # play_history：合并新旧
     new_ph = _build_ph_list(db_play_history)
@@ -48,30 +52,7 @@ def _build_ugreen_record(db: DbRecord, db_play_history: list,
 
     fav_list = [Favorite(**{k: v for k, v in f.items()}) for f in db_favorites]
 
-    col_obj = None
-    if db_collection:
-        cats = db_collection.get("category_id_list") or []
-        col_obj = Collection(
-            name=db_collection.get("name", ""),
-            collection_id=db_collection.get("collection_id", ""),
-            tmdb_id=str(db_collection.get("tmdb_id", "0") or "0"),
-            pinyin_first=db_collection.get("pinyin_first", ""),
-            pinyin_full=db_collection.get("pinyin_full", ""),
-            poster_path=db_collection.get("poster_path", ""),
-            backdrop_path=db_collection.get("backdrop_path", ""),
-            language=db_collection.get("language", ""),
-            introduction=db_collection.get("introduction", ""),
-            is_manual_create=bool(db_collection.get("is_manual_create")),
-            media_lib_set_id=db_collection.get("media_lib_set_id", 0),
-            year=db_collection.get("year", 0),
-            score=float(db_collection.get("score", 0) or 0),
-            category_id_list=[str(c) for c in cats] if cats else [],
-            src_type=db_collection.get("src_type", 0),
-            jp_name=db_collection.get("jp_name", ""),
-            cloud_id=db_collection.get("cloud_id", ""),
-            ctime=db_collection.get("ctime", 0),
-            utime=db_collection.get("utime", 0),
-        )
+    col_obj = Collection.from_db_dict(db_collection)
 
     # 演员：DB 原始 dict → Actor 列表（备份到 .ugreen.json）
     actor_list = [
@@ -87,6 +68,7 @@ def _build_ugreen_record(db: DbRecord, db_play_history: list,
         # 扩展数据
         play_history=ph_list, favorites=fav_list,
         collection=col_obj, actors=actor_list,
+        episodes=episodes or [],
         nfo_snapshot=old_nfo_snapshot,
     )
 
@@ -105,7 +87,9 @@ def _build_ph_list(raw: list[dict]) -> list[PlayHistory]:
                 except OSError: pass
         result.append(PlayHistory(
             uid=ph.get("uid", 0), category_id=ph.get("category_id", ""),
-            hash_fingerprint=hash_fp, progress=float(ph.get("progress", 0)),
+            hash_fingerprint=hash_fp,
+            file_name=ph.get("file_name", ""),
+            progress=float(ph.get("progress", 0)),
             current_play_time=ph.get("current_play_time", 0),
             last_access_time=ph.get("last_access_time", 0),
             watch_status=ph.get("watch_status", 1),

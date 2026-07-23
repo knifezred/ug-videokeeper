@@ -1,6 +1,5 @@
 """同步执行器 — 遍历 file_info 表，cache 不存在/存在两种决策路径"""
 import os
-from dataclasses import fields as dc_fields
 from config import log, DRY_RUN, TARGET_PATH
 from db import queries, sync as db_sync
 from db.connection import connect
@@ -9,16 +8,7 @@ from nfo.reader import read_nfo
 from nfo.writer import write_ugreen_from_db
 from sync.strategy import decide_first_sync, decide_from_cache
 from models import NfoRecord, VideoMeta, FileRecord
-from models import DbRecord, UgreenRecord, PlayHistory, Favorite, Collection, Actor
 import state as st
-
-
-def _safe_float(v, default: float = 0.0) -> float:
-    """外部/JSON 数据转 float；脏值（如 '8.5x'）返回默认值而非崩。"""
-    try:
-        return float(v)
-    except (ValueError, TypeError):
-        return default
 
 
 def run_sync():
@@ -161,8 +151,9 @@ def _exec_first_sync(conn, fr: FileRecord, folder: str,
 
 # ---- DB → .ugreen.json ----
 
-def _write_ugreen_from_db(conn, category_id: str, folder: str):
-    """查询 DB 全量数据并写入 .ugreen.json"""
+def _write_ugreen_from_db(conn, category_id: str, folder: str,
+                          episodes: list | None = None):
+    """查询 DB 全量数据并写入 .ugreen.json（支持电视剧 episodes）"""
     db_rec = queries.fetch_video_by_category(conn, category_id)
     if db_rec is None:
         log.warning("DB→JSON: DB 无记录 cat=%s", category_id)
@@ -185,7 +176,7 @@ def _write_ugreen_from_db(conn, category_id: str, folder: str):
              len(old_ph) if old_ph else "无", len(db_play))
     write_ugreen_from_db(folder, db_rec, db_play, db_fav, db_col,
                          old_ph_list=old_ph, old_nfo_snapshot=old_snap,
-                         db_actors=db_actors)
+                         db_actors=db_actors, episodes=episodes)
 
 
 # ---- 电视剧 ----
@@ -219,7 +210,6 @@ def _process_tv(conn, fr: FileRecord, folder: str,
         if decision.scene == "cache.1":
             ug = ugreen.read_ugreen(folder)
             if ug:
-                cat_changed = (ug.category_id != fr.category_id)
                 ug.category_id = fr.category_id  # 优先用 file_info 最新值
                 _restore_tv_from_ugreen(conn, ug, folder)
                 stats["nfo_to_db"] = stats.get("nfo_to_db", 0) + 1
@@ -235,9 +225,8 @@ def _process_tv(conn, fr: FileRecord, folder: str,
     ug = ugreen.read_ugreen(folder)
     if ug:
         log.debug("  → 首次同步 TV: .ugreen.json 存在 → 恢复")
-        cat_changed = (ug.category_id != fr.category_id)
         ug.category_id = fr.category_id
-        _restore_tv_from_ugreen(conn, ug, folder, cat_changed=cat_changed)
+        _restore_tv_from_ugreen(conn, ug, folder)
         stats["nfo_to_db"] = stats.get("nfo_to_db", 0) + 1
     else:
         log.debug("  → 首次同步 TV: 从 DB 生成 .ugreen.json")
@@ -247,93 +236,25 @@ def _process_tv(conn, fr: FileRecord, folder: str,
 
 
 def _restore_tv_from_ugreen(conn, ug, folder: str):
-    """.ugreen.json → DB：ug_video_info 全字段回写 + 剧集 + 扩展数据"""
+    """.ugreen.json → DB：恢复用户编辑字段 + 剧集 + 扩展数据"""
     from utils import fix_paths_for_video_dir
     fix_paths_for_video_dir(ug, folder)
-    # 仅还原用户在 NAS UI 可编辑的字段（USER_EDITABLE_FIELDS）；其余仅备份不还原
     db_sync._update_user_editable(conn, ug, ug.category_id)
-    for ep in ug.episodes:
-        with conn.cursor() as cur:
-            cur.execute(
-                """UPDATE ug_television_episode SET
-                     season = %s, episode = %s, name = %s,
-                     overview = %s, cover_path = %s, language = %s,
-                     episode_flag = %s, ctime = %s, utime = %s,
-                     media_lib_set_id = %s
-                   WHERE ug_television_episode_id = %s""",
-                (ep.get("season", 0), ep.get("episode", 0), ep.get("name", ""),
-                 ep.get("overview", ""), ep.get("cover_path", ""),
-                 ep.get("language", ""), ep.get("episode_flag", ""),
-                 ep.get("ctime", 0), ep.get("utime", 0),
-                 ep.get("media_lib_set_id", 0),
-                 ep.get("ug_television_episode_id", 0)),
-            )
+    db_sync._update_episodes(conn, ug.category_id, ug.episodes)
     if ug.play_history:
-        db_sync.upsert_play_history(conn, ug.play_history, folder, "", ug.category_id)
+        dir_prefix = os.path.basename(os.path.normpath(folder))
+        db_sync.upsert_play_history(conn, ug.play_history, folder, dir_prefix, ug.category_id)
     if ug.favorites:
         db_sync.upsert_favorites(conn, ug.category_id, ug.favorites)
     if ug.collection and ug.collection.name:
         db_sync.upsert_collection_for_video(conn, ug.category_id, ug.collection)
-    # 演员仅备份到 .ugreen.json，不还原到 DB
     log.debug("TV 恢复: cat=%s episodes=%d", ug.category_id, len(ug.episodes))
 
 
 def _dump_tv_to_ugreen(conn, category_id: str, folder: str):
-    """DB → .ugreen.json：电视剧全量写入"""
-    db_rec = queries.fetch_video_by_category(conn, category_id)
-    if db_rec is None:
-        return
-
+    """DB → .ugreen.json：电视剧全量写入（episodes + 通用字段）"""
     eps = queries.fetch_episodes(conn, category_id)
-    phs = queries.fetch_play_history(conn, category_id)
-    favs = queries.fetch_favorites(conn, category_id)
-    col = queries.fetch_collection(conn, category_id)
-    db_actors = queries.fetch_actors(conn, category_id)
-    actor_list = [Actor(name=a.get("name", ""), role=a.get("role", ""),
-                        tmdbid=a.get("tmdb_id", 0)) for a in db_actors]
-
-    from nfo.writer import _build_ph_list, _merge_play_history
-    new_ph = _build_ph_list(phs)
-    old_ug = ugreen.read_ugreen(folder)
-    old_snap = old_ug.nfo_snapshot if old_ug else None
-    if old_ug and old_ug.play_history:
-        ph_list = _merge_play_history(old_ug.play_history, new_ph)
-        log.debug("TV play_history 合并: 旧=%d 新=%d 合并后=%d",
-                 len(old_ug.play_history), len(new_ph), len(ph_list))
-    else:
-        ph_list = new_ph
-        log.debug("TV play_history: 无旧记录，仅写入 DB 数据 (%d 条)", len(new_ph))
-
-    fav_list = [Favorite(**{k: v for k, v in f.items()}) for f in favs]
-    col_obj = None
-    if col:
-        cats = col.get("category_id_list") or []
-        col_obj = Collection(
-            name=col.get("name", ""), collection_id=col.get("collection_id", ""),
-            tmdb_id=str(col.get("tmdb_id", "0") or "0"),
-            pinyin_first=col.get("pinyin_first", ""), pinyin_full=col.get("pinyin_full", ""),
-            poster_path=col.get("poster_path", ""), backdrop_path=col.get("backdrop_path", ""),
-            language=col.get("language", ""), introduction=col.get("introduction", ""),
-            is_manual_create=bool(col.get("is_manual_create")),
-            media_lib_set_id=col.get("media_lib_set_id", 0),
-            year=col.get("year", 0), score=_safe_float(col.get("score", 0)),
-            category_id_list=[str(c) for c in cats] if cats else [],
-            src_type=col.get("src_type", 0), jp_name=col.get("jp_name", ""),
-            cloud_id=col.get("cloud_id", ""), ctime=col.get("ctime", 0), utime=col.get("utime", 0),
-        )
-
-    # ug_video_info 全量字段：直接从 DbRecord 拷贝（单一来源，消除手写映射）
-    common = {f.name: getattr(db_rec, f.name) for f in dc_fields(DbRecord)}
-    record = UgreenRecord(
-        **common,
-        episodes=eps, play_history=ph_list,
-        favorites=fav_list, collection=col_obj, actors=actor_list,
-        nfo_snapshot=old_snap,
-    )
-    if DRY_RUN:
-        log.info("[DRY RUN] 将写入 .ugreen.json: %s", ugreen.ugreen_path(folder))
-    else:
-        ugreen.write_ugreen(folder, record)
+    _write_ugreen_from_db(conn, category_id, folder, episodes=eps)
 
 
 # ---- 辅助 ----

@@ -251,186 +251,18 @@ _GENRE_NAMES = {
 def _genre_name(gid):
     return _GENRE_NAMES.get(gid, "\u7c7b\u578b" + str(gid))
 
-_HTML_TPL = """<!DOCTYPE html><html lang="zh-CN"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>__TITLE__</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#070b14;color:#e2e8f0;min-height:100vh;line-height:1.5}
-.app{max-width:1120px;margin:0 auto;padding:20px 16px 40px}
-.topbar{display:flex;align-items:center;justify-content:space-between;padding:16px 0 24px}
-.topbar .logo{display:flex;align-items:center;gap:10px}
-.topbar .logo-icon{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,__PRIMARY__,rgba(__PRIMARY_RGB__,0.4));display:flex;align-items:center;justify-content:center;font-size:16px}
-.topbar .logo-text{font-size:17px;font-weight:600;color:#f1f5f9}
-.topbar .logo-sub{font-size:11px;color:rgba(255,255,255,0.35)}
-.topbar .meta{display:flex;align-items:center;gap:16px;font-size:12px;color:rgba(255,255,255,0.4)}
-.topbar .meta span{display:flex;align-items:center;gap:5px}
-.status-dot{width:7px;height:7px;border-radius:50%;background:#22c55e;box-shadow:0 0 6px rgba(34,197,94,0.5)}
-.hero-card{background:linear-gradient(135deg,__HERO_FROM__ 0%,__HERO_TO__ 100%);border:1px solid rgba(255,255,255,0.06);border-radius:18px;padding:36px 32px;position:relative;overflow:hidden;margin-bottom:20px}
-.hero-card::before{content:'';position:absolute;top:-80px;right:-60px;width:280px;height:280px;background:radial-gradient(circle,__GLOW__ 0%,transparent 70%);pointer-events:none}
-.hero-card::after{content:'';position:absolute;bottom:-100px;left:-40px;width:240px;height:240px;background:radial-gradient(circle,rgba(__PRIMARY_RGB__,0.05) 0%,transparent 70%);pointer-events:none}
-.hero-tag{display:inline-flex;align-items:center;gap:6px;padding:5px 14px;border-radius:20px;background:__BADGE_BG__;color:__BADGE_COLOR__;font-size:12px;font-weight:600;margin-bottom:14px;position:relative;z-index:1}
-.hero-year{font-size:56px;font-weight:700;color:__PRIMARY__;letter-spacing:-2px;line-height:1;position:relative;z-index:1;text-shadow:0 0 40px rgba(__PRIMARY_RGB__,0.2)}
-.hero-title{font-size:18px;color:#f1f5f9;margin-top:6px;position:relative;z-index:1;font-weight:500}
-.hero-desc{font-size:13px;color:rgba(255,255,255,0.4);margin-top:6px;position:relative;z-index:1}
-.hero-date{position:absolute;top:20px;right:24px;font-size:12px;color:rgba(255,255,255,0.3);z-index:1}
-.section-title{font-size:14px;font-weight:600;color:#f1f5f9;margin-bottom:14px;display:flex;align-items:center;gap:8px}
-.section-title .dot{width:4px;height:16px;border-radius:2px;background:__PRIMARY__;flex-shrink:0}
-.card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:20px;margin-bottom:16px}
-.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
-.stat-box{text-align:center;padding:16px 8px;border-radius:12px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.04)}
-.stat-box .s-num{font-size:28px;font-weight:700;color:__PRIMARY__;letter-spacing:-1px}
-.stat-box .s-lbl{font-size:11px;color:rgba(255,255,255,0.4);margin-top:2px}
-.stat-box .s-sub{font-size:10px;color:rgba(255,255,255,0.25);margin-top:1px}
-.two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.chart-wrap{height:220px;position:relative}
-.chart-full{height:200px;position:relative}
-.poster-row{display:flex;gap:14px;overflow-x:auto;padding-bottom:8px;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,0.1) transparent}
-.poster-row::-webkit-scrollbar{height:5px}
-.poster-row::-webkit-scrollbar-track{background:transparent}
-.poster-row::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:4px}
-.pitem{flex-shrink:0;width:130px;cursor:pointer;transition:transform 0.2s}
-.pitem:hover{transform:translateY(-4px)}
-.pitem .pimg{width:130px;height:185px;border-radius:10px;overflow:hidden;background:rgba(255,255,255,0.05)}
-.pitem .pimg img{width:100%;height:100%;object-fit:cover;display:block}
-.pitem .pimg .pfallback{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:36px;color:rgba(255,255,255,0.15)}
-.pitem .prank{position:absolute;top:6px;left:6px;width:22px;height:22px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;z-index:2}
-.pitem .prank.r1{background:linear-gradient(135deg,#d4a853,#b8860b)}
-.pitem .prank.r2{background:linear-gradient(135deg,#94a3b8,#64748b)}
-.pitem .prank.r3{background:linear-gradient(135deg,#cd7f32,#a0522d)}
-.pitem .prank.rx{background:rgba(255,255,255,0.15);backdrop-filter:blur(4px)}
-.pitem .pwrap{position:relative;margin-bottom:8px}
-.pitem .pname{font-size:12px;font-weight:500;color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:130px}
-.pinfo{font-size:11px;color:rgba(255,255,255,0.4)}
-.pinfo b{color:__PRIMARY__;font-weight:600}
-.triple{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
-.t-item{text-align:center;padding:16px 8px;border-radius:10px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.04)}
-.t-item .tlbl{font-size:11px;color:rgba(255,255,255,0.35);margin-bottom:6px}
-.t-item .tval{font-size:15px;font-weight:600;color:#f1f5f9}
-.t-item .tval-big{font-size:26px;font-weight:700;color:__PRIMARY__}
-.user-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
-.user-item{display:flex;align-items:center;gap:12px;padding:14px;border-radius:12px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.04)}
-.u-avatar{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;color:#fff;flex-shrink:0}
-.u-info .u-name{font-size:13px;font-weight:600;color:#f1f5f9}
-.u-info .u-detail{font-size:11px;color:rgba(255,255,255,0.4);margin-top:2px}
-.actor-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:12px}
-.actor-item{background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.04);border-radius:12px;padding:16px;text-align:center}
-.actor-item .ai-char{width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,__PRIMARY__,rgba(__PRIMARY_RGB__,0.4));display:flex;align-items:center;justify-content:center;margin:0 auto 10px;color:#fff;font-size:16px;font-weight:600}
-.actor-item .ai-name{font-size:12px;font-weight:600;color:#e2e8f0}
-.actor-item .ai-count{font-size:11px;color:rgba(255,255,255,0.4);margin-top:3px}
-.footer{margin-top:24px;padding:16px;text-align:center;font-size:11px;color:rgba(255,255,255,0.2);border-top:1px solid rgba(255,255,255,0.04)}
-@media(max-width:768px){
-.stats-row{grid-template-columns:repeat(2,1fr)}.two-col{grid-template-columns:1fr}.triple{grid-template-columns:1fr}.hero-year{font-size:42px}.hero-card{padding:24px 20px}
-.pitem{width:110px}.pitem .pimg,.pitem .pimg{width:110px;height:157px}
-}
-@media(max-width:480px){.stats-row{grid-template-columns:repeat(2,1fr)}.topbar{flex-direction:column;gap:10px;text-align:center}}
-</style></head><body>
-<div class="app">
-<div class="topbar">
-<div class="logo"><div class="logo-icon">\U0001F3AC</div><div><div class="logo-text">个人NAS观影报告</div><div class="logo-sub">你的专属观影数据洞察</div></div></div>
-<div class="meta"><span>\u6570\u636E\u7edf\u8ba1\u622a\u6b62: __DATE__</span><span><i class="status-dot"></i> NAS \u5728\u7ebf</span></div>
-</div>
+_TEMPLATE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "templates"
+)
 
-<div class="hero-card">
-<div class="hero-date">__RANGE__</div>
-<div class="hero-tag">__TAG__</div>
-<div class="hero-year">__YEAR_DISPLAY__</div>
-<div class="hero-title">__TITLE_LINE__</div>
-<div class="hero-desc">__DESC__</div>
-</div>
-
-<div class="stats-row">
-<div class="stat-box"><div class="s-num">__MOVIES__</div><div class="s-lbl">观影部数</div><div class="s-sub">__MOVIES_CHG__</div></div>
-<div class="stat-box"><div class="s-num">__HOURS__</div><div class="s-lbl">观看时长</div><div class="s-sub">\u8f85\u52bf __AVG_DAILY__h/\u5929</div></div>
-<div class="stat-box"><div class="s-num">__COMPLETION__</div><div class="s-lbl">完播率</div><div class="s-sub">\u5171 __TOTAL_PLAYS__ \u6b21\u64ad\u653e</div></div>
-<div class="stat-box"><div class="s-num">__STREAK__<small style="font-size:13px;color:rgba(255,255,255,0.3)"> 天</small></div><div class="s-lbl">最长连续</div><div class="s-sub">\u91cd\u770b <b style="color:__PRIMARY__">__REWATCHED__</b> \u90e8</div></div>
-</div>
-
-<div class="card">
-<div class="section-title"><span class="dot"></span>年度总览</div>
-<div class="two-col" style="margin-bottom:20px">
-<div>
-<div style="margin-bottom:12px"><div style="font-size:11px;color:rgba(255,255,255,0.35);margin-bottom:8px">观影偏好</div><div id="genre-mini"></div></div>
-<div style="margin-bottom:12px"><div style="font-size:11px;color:rgba(255,255,255,0.35);margin-bottom:8px">地区分布</div><div id="country-mini" style="font-size:12px;color:rgba(255,255,255,0.5)"></div></div>
-</div>
-<div>
-<div style="margin-bottom:12px"><div style="font-size:11px;color:rgba(255,255,255,0.35);margin-bottom:8px">类型分布</div><div class="chart-wrap"><canvas id="cg"></canvas></div></div>
-</div>
-</div>
-<div class="triple">
-<div class="t-item"><div class="tlbl">最长单日观影</div><div class="tval-big">__MAX_DAY_HOURS__<small style="font-size:12px;color:rgba(255,255,255,0.3)"> 小时</small></div></div>
-<div class="t-item"><div class="tlbl">最爱的影片</div><div class="tval" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 auto">__FAV_MOVIE__</div><div class="pinfo" style="margin-top:4px">★ __FAV_SCORE__ · __FAV_PLAYS__ \u6b21</div></div>
-<div class="t-item"><div class="tlbl">观影最高峰</div><div class="tval">__PEAK_DATE__</div><div class="pinfo" style="margin-top:4px">__PEAK_COUNT__ \u90e8\u7247</div></div>
-</div>
-</div>
-
-<div class="card">
-<div class="section-title"><span class="dot"></span>年度TOP10影片</div>
-<div class="poster-row">__TOP10__</div>
-</div>
-
-<div class="two-col">
-<div class="card">
-<div class="section-title"><span class="dot"></span>每月观影时长</div>
-<div class="chart-full"><canvas id="cm"></canvas></div>
-</div>
-<div class="card">
-<div class="section-title"><span class="dot"></span>完成度分布</div>
-<div class="chart-wrap"><canvas id="cct"></canvas></div>
-</div>
-</div>
-
-<div class="two-col">
-<div class="card">
-<div class="section-title"><span class="dot"></span>星期几最爱看</div>
-<div class="chart-wrap"><canvas id="cw"></canvas></div>
-</div>
-<div class="card">
-<div class="section-title"><span class="dot"></span>最常观影时段</div>
-<div class="chart-wrap"><canvas id="ctd"></canvas></div>
-</div>
-</div>
-
-<div class="card" id="actors-sec" style="display:none">
-<div class="section-title"><span class="dot"></span>出镜最多的演员</div>
-<div class="actor-grid" id="actor-grid"></div>
-</div>
-
-<div class="card">
-<div class="section-title"><span class="dot"></span>家庭成员</div>
-<div class="user-grid">__USER_LIST__</div>
-</div>
-
-<div class="footer">电影是生活的镜子，愿每一帧都值得铭记 —— <b style="color:__PRIMARY__">NAS</b> · 数据驱动</div>
-</div>
-<script>
-const _M=__MONTHLY_JSON__,_W=__WEEKDAY_JSON__,__G=__GENRE_JSON__;
-const _CT=__COMP_TIERS__,_TD=__TOD_JSON__,__DC=__DECADES_JSON__,__CO=__COUNTRIES_JSON__,__AC=__ACTORS_JSON__;
-const _PC='__PRIMARY__',_PR='__PRIMARY_RGB__';
-
-if(__AC&&__AC.length){
- document.getElementById('actors-sec').style.display='';
- var ag=document.getElementById('actor-grid');
- __AC.slice(0,12).forEach(function(a){
-  ag.innerHTML+='<div class="actor-item"><div class="ai-char">'+html.escape(a.name).charAt(0)+'</div><div class="ai-name">'+html.escape(a.name)+'</div><div class="ai-count">'+a.count+' 次</div></div>';
- });
-}
-
-var _CH=[_PC,'#22c55e','#f97316','#c084fc','#ec4899','#14b8a6','#eab308','#f43f5e','#6366f1','#8b5cf6'];
-function _darkTooltip(){return{backgroundColor:'rgba(15,23,42,0.95)',cornerRadius:8,titleColor:'#f1f5f9',bodyColor:'#94a3b8',padding:10,boxPadding:4,titleFont:{size:12},bodyFont:{size:11}}}
-function _darkGrid(c){return{color:c||'rgba(255,255,255,0.05)',drawBorder:false}}
-
-new Chart(document.getElementById('cm'),{type:'bar',data:{labels:_M.map(function(m){return m.month+'\u6708'}),datasets:[{label:'h',data:_M.map(function(m){return m.hours}),backgroundColor:function(ctx){var i=ctx.dataIndex;return _CH[i%_CH.length]+'30'},borderColor:_CH,borderWidth:1.5,borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:_darkTooltip()},scales:{y:{beginAtZero:true,grid:_darkGrid(),ticks:{color:'rgba(255,255,255,0.35)',font:{size:10}}},x:{grid:{display:false},ticks:{color:'rgba(255,255,255,0.35)',font:{size:10}}}}}});
-new Chart(document.getElementById('cg'),{type:'doughnut',data:{labels:__G.map(function(g){return g.name}),datasets:[{data:__G.map(function(g){return g.count}),backgroundColor:_CH.slice(0,__G.length),borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,cutout:'58%',plugins:{legend:{position:'bottom',labels:{padding:12,font:{size:11},color:'rgba(255,255,255,0.5)',usePointStyle:true,pointStyle:'circle'}},tooltip:_darkTooltip()}}});
-new Chart(document.getElementById('cw'),{type:'bar',data:{labels:_W.map(function(w){return '\u5468'+w.name}),datasets:[{label:'h',data:_W.map(function(w){return w.hours}),backgroundColor:_PC+'28',borderColor:_PC,borderWidth:1.5,borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:_darkTooltip()},scales:{y:{beginAtZero:true,grid:_darkGrid(),ticks:{color:'rgba(255,255,255,0.35)',font:{size:10}}},x:{grid:{display:false},ticks:{color:'rgba(255,255,255,0.35)',font:{size:10}}}}}});
-new Chart(document.getElementById('cct'),{type:'bar',data:{labels:['<25%','25-50%','50-75%','75-90%','90%+'],datasets:[{label:'n',data:_CT,backgroundColor:['rgba(244,63,94,0.25)','rgba(249,115,22,0.25)','rgba(234,179,8,0.25)','rgba(34,197,94,0.25)',_PC+'40'],borderColor:['#f43f5e','#f97316','#eab308','#22c55e',_PC],borderWidth:1.5,borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,indexAxis:'y',plugins:{legend:{display:false},tooltip:_darkTooltip()},scales:{x:{beginAtZero:true,grid:_darkGrid(),ticks:{color:'rgba(255,255,255,0.35)',font:{size:10}}},y:{grid:{display:false},ticks:{color:'rgba(255,255,255,0.45)',font:{size:11}}}}}});
-new Chart(document.getElementById('ctd'),{type:'bar',data:{labels:_TD.map(function(t){return t.lbl}),datasets:[{label:'n',data:_TD.map(function(t){return t.count}),backgroundColor:['rgba(100,116,139,0.2)','#3b82f630','#f9731630','#a855f730'],borderColor:['#64748b','#3b82f6','#f97316','#a855f7'],borderWidth:1.5,borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:_darkTooltip()},scales:{y:{beginAtZero:true,grid:_darkGrid(),ticks:{color:'rgba(255,255,255,0.35)',font:{size:10}}},x:{grid:{display:false},ticks:{color:'rgba(255,255,255,0.45)',font:{size:11}}}}}});
-
-if(__CO&&__CO.length){var cm=document.getElementById('country-mini');cm.innerHTML=__CO.map(function(c){return '<span style="display:inline-block;margin:4px 8px 4px 0;color:rgba(255,255,255,0.5)">'+html.escape(String(c.id))+' <b style="color:'+_PC+'">'+c.count+'</b></span>';}).join('')}
-if(__G&&__G.length){var gm=document.getElementById('genre-mini');gm.innerHTML='<div style="display:flex;flex-wrap:wrap;gap:6px">'+__G.slice(0,6).map(function(g){return '<span style="padding:3px 10px;border-radius:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);font-size:11px;color:rgba(255,255,255,0.6)">'+html.escape(g.name)+' <b style="color:'+_PC+'">'+g.count+'%</b></span>'}).join('')+'</div>'}
-</script></body></html>"""
+def _load_template(name: str, **markers) -> str:
+    """从 data/templates/ 加载 HTML 模板并替换标记"""
+    path = os.path.join(_TEMPLATE_DIR, name)
+    with open(path, "r", encoding="utf-8") as f:
+        html = f.read()
+    for key, val in markers.items():
+        html = html.replace(f"__{key.upper()}__", str(val))
+    return html
 
 
 def _build_top10_item(idx, item, poster_dir):
@@ -474,15 +306,7 @@ def _build_html(data, report_type, report_dir=None):
         w=(" 第{w}周".format(w=data.get("week", 0))) if report_type == "weekly" else "",
     )
     if data.get("empty"):
-        return (
-            '<!DOCTYPE html><html><head><meta charset="utf-8">'
-            '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            '<title>%s</title>'
-            '<style>body{margin:0;padding:40px 20px;font-family:-apple-system,sans-serif;'
-            'background:#070b14;text-align:center;color:rgba(255,255,255,0.4)}'
-            'h1{font-size:20px;font-weight:500;color:#f1f5f9}</style></head>'
-            '<body><h1>%s</h1><p>暂无播放记录</p></body></html>'
-        ) % (title, title)
+        return _load_template("empty.html", TITLE=title)
 
     poster_dir = os.path.join(report_dir, "posters") if report_dir else None
     if poster_dir:
@@ -565,7 +389,7 @@ def _build_html(data, report_type, report_dir=None):
         else:
             movies_chg = "较去年 新"
 
-    h = _HTML_TPL
+    h = _load_template("report.html")
     replacements = [
         ("__TITLE__", title),
         ("__DATE__", datetime.now().strftime("%Y-%m-%d")),

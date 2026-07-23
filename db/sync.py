@@ -25,6 +25,54 @@ def _update_user_editable(conn, ug, cat: str):
         )
 
 
+def _update_episodes(conn, category_id: str, episodes: list[dict]):
+    """恢复电视剧剧集数据。
+
+    以 (category_id, season, episode) 为自然键匹配：
+    - 数据库中已有 → UPDATE 覆盖用户编辑过的字段
+    - 数据库中无（旧备份的剧集，刮削后不存在）→ INSERT 回来
+    - 刮削新增但旧备份里没有 → 不动（保留刮削数据）
+    """
+    if not episodes:
+        return
+    for ep in episodes:
+        season = ep.get("season", 0)
+        episode = ep.get("episode", 0)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ug_television_episode_id FROM ug_television_episode "
+                "WHERE category_id = %s AND season = %s AND episode = %s",
+                (category_id, season, episode),
+            )
+            row = cur.fetchone()
+            if row:
+                cur.execute(
+                    """UPDATE ug_television_episode SET
+                         name = %s, overview = %s, cover_path = %s,
+                         language = %s, episode_flag = %s,
+                         ctime = %s, utime = %s, media_lib_set_id = %s
+                       WHERE ug_television_episode_id = %s""",
+                    (ep.get("name", ""), ep.get("overview", ""),
+                     ep.get("cover_path", ""), ep.get("language", ""),
+                     ep.get("episode_flag", ""), ep.get("ctime", 0),
+                     ep.get("utime", 0), ep.get("media_lib_set_id", 0),
+                     row[0]),
+                )
+            else:
+                cur.execute(
+                    """INSERT INTO ug_television_episode
+                       (category_id, season, episode, name, overview,
+                        cover_path, language, episode_flag,
+                        ctime, utime, media_lib_set_id)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (category_id, season, episode,
+                     ep.get("name", ""), ep.get("overview", ""),
+                     ep.get("cover_path", ""), ep.get("language", ""),
+                     ep.get("episode_flag", ""), ep.get("ctime", 0),
+                     ep.get("utime", 0), ep.get("media_lib_set_id", 0)),
+                )
+
+
 # ---- .ugreen.json → DB 恢复 ----
 
 def sync_nfo_to_db(conn, nfo: "NfoRecord") -> int:
@@ -53,8 +101,9 @@ def sync_nfo_to_db(conn, nfo: "NfoRecord") -> int:
     # 扩展数据回写
     if ug.play_history:
         log.debug("sync_nfo_to_db: 写入 %d 条播放记录 cat=%s", len(ug.play_history), cat)
+        dir_prefix = os.path.basename(os.path.normpath(nfo.video_dir))
         upsert_play_history(conn, ug.play_history,
-                            nfo.video_dir, os.path.basename(nfo.nfo_path), cat)
+                            nfo.video_dir, dir_prefix, cat)
     if ug.favorites:
         log.debug("sync_nfo_to_db: 写入 %d 条收藏 cat=%s", len(ug.favorites), cat)
         upsert_favorites(conn, cat, ug.favorites)
@@ -72,16 +121,23 @@ def sync_nfo_to_db(conn, nfo: "NfoRecord") -> int:
 # ---- 播放记录 ----
 
 def upsert_play_history(conn, items: list[PlayHistory],
-                        video_dir: str, nfo_filename: str,
+                        video_dir: str, dir_prefix: str,
                         category_id: str = ""):
-    """三级匹配定位 file_info：hash_fingerprint → file_name+folder → folder+prefix。
-    若 folder_path 直接查不到，用 category_id 兜底。
+    """匹配定位 file_info 恢复播放记录。
+
+    四级匹配（优先级从高到低）：
+      1. hash_fingerprint 精确匹配（内容不变时最可靠）
+      2. 精确文件名匹配（hash 变了但文件名没变时兜底，不再依赖 NFO 文件名）
+      3. strm 自算 hash（.strm 专用）
+      4. 目录名前缀 fallback（The Matrix → the.matrix.mkv）
+
+    folder_path 查不到时用 category_id 兜底。
     每条播放记录独立匹配，匹配到则写入对应 file_id，否则跳过。
     """
     if not items:
         return
 
-    nfo_prefix = os.path.splitext(nfo_filename)[0].lower() if nfo_filename else ""
+    lo_prefix = dir_prefix.lower() if dir_prefix else ""
 
     # 先按 folder_path 查
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -118,7 +174,7 @@ def upsert_play_history(conn, items: list[PlayHistory],
 
     matched = []
     for ph in items:
-        row = _match_file_info(ph, candidates, nfo_prefix)
+        row = _match_file_info(ph, candidates, lo_prefix)
         if row:
             matched.append((ph, row["file_id"], row["category_id"], row["vid"]))
         else:
@@ -168,14 +224,26 @@ def upsert_play_history(conn, items: list[PlayHistory],
     log.debug("upsert_play_history: 写入 %d/%d 条", len(matched), len(items))
 
 
-def _match_file_info(ph: PlayHistory, candidates: list[dict], nfo_prefix: str) -> dict | None:
-    """二级匹配：hash_fingerprint (含 strm 自算) → folder+prefix 兜底"""
+def _match_file_info(ph: PlayHistory, candidates: list[dict], dir_prefix: str) -> dict | None:
+    """四级匹配：hash → 精确文件名 → strm hash → 前缀兜底"""
+    # 一级：hash_fingerprint 精确匹配（最可靠，内容不变时）
     if ph.hash_fingerprint:
         for c in candidates:
             if c["hash_fingerprint"] and c["hash_fingerprint"] == ph.hash_fingerprint:
                 log.debug("  ph uid=%s 命中 hash_fingerprint → file_id=%d",
                           ph.uid, c["file_id"])
                 return c
+
+    # 二级：精确文件名匹配（hash 变了但文件名没变时精准兜底）
+    if ph.file_name:
+        for c in candidates:
+            if c["file_name"].lower() == ph.file_name.lower():
+                log.debug("  ph uid=%s 命中精确文件名 → file_id=%d",
+                          ph.uid, c["file_id"])
+                return c
+
+    # 三级：strm 自算 hash
+    if ph.hash_fingerprint:
         for c in candidates:
             if not c["hash_fingerprint"] and c["file_name"].endswith(".strm"):
                 strm_path = os.path.join(c["folder_path"], c["file_name"])
@@ -190,11 +258,12 @@ def _match_file_info(ph: PlayHistory, candidates: list[dict], nfo_prefix: str) -
                                   ph.uid, c["file_id"])
                         return c
 
-    if nfo_prefix:
+    # 四级：目录名前缀 fallback（"The Matrix" → "the.matrix" 匹配 "The.Matrix.1999.mkv"）
+    if dir_prefix:
         for c in candidates:
-            if c["file_name"].lower().startswith(nfo_prefix):
-                log.debug("  ph uid=%s 命中 folder+prefix → file_id=%d",
-                          ph.uid, c["file_id"])
+            if c["file_name"].lower().startswith(dir_prefix):
+                log.debug("  ph uid=%s 命中目录前缀 %s → file_id=%d",
+                          ph.uid, dir_prefix, c["file_id"])
                 return c
 
     return None

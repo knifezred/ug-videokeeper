@@ -16,24 +16,6 @@ def compute_file_hash(file_path: str) -> str:
     return h.hexdigest()
 
 
-# ---- 分级转换 (int ↔ str) ----
-
-_MPAA_INT_TO_STR = {1: "G", 2: "PG", 3: "PG-13", 4: "R", 5: "NC-17"}
-_MPAA_STR_TO_INT = {
-    "G": 1, "PG": 2, "PG-13": 3, "R": 4, "NC-17": 5,
-    "TV-Y": 1, "TV-G": 1, "TV-PG": 2, "TV-14": 3, "TV-MA": 4,
-}
-
-
-def int_to_mpaa(grading: int) -> str:
-    """分级数字 → 字符串。例: 3 → 'PG-13'"""
-    return _MPAA_INT_TO_STR.get(grading, "")
-
-
-def mpaa_to_int(mpaa: str) -> int:
-    """分级字符串 → 数字。例: 'PG-13' → 3"""
-    return _MPAA_STR_TO_INT.get(mpaa.upper(), 0)
-
 
 # ---- 日期转换 (Unix 时间戳 ↔ 'YYYY-MM-DD') ----
 

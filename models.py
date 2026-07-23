@@ -33,12 +33,41 @@ class Collection:
     ctime: int = 0
     utime: int = 0
 
+    @classmethod
+    def from_db_dict(cls, d: dict | None) -> "Collection | None":
+        """从 DB / 外部 dict 构建 Collection（统一类型转换，消除重复构造）"""
+        if not d:
+            return None
+        cats = d.get("category_id_list") or []
+        return cls(
+            name=d.get("name", ""),
+            collection_id=d.get("collection_id", ""),
+            tmdb_id=str(d.get("tmdb_id", "0") or "0"),
+            pinyin_first=d.get("pinyin_first", ""),
+            pinyin_full=d.get("pinyin_full", ""),
+            poster_path=d.get("poster_path", ""),
+            backdrop_path=d.get("backdrop_path", ""),
+            language=d.get("language", ""),
+            introduction=d.get("introduction", ""),
+            is_manual_create=bool(d.get("is_manual_create")),
+            media_lib_set_id=d.get("media_lib_set_id", 0),
+            year=d.get("year", 0),
+            score=float(d.get("score", 0) or 0),
+            category_id_list=[str(c) for c in cats] if cats else [],
+            src_type=d.get("src_type", 0),
+            jp_name=d.get("jp_name", ""),
+            cloud_id=d.get("cloud_id", ""),
+            ctime=d.get("ctime", 0),
+            utime=d.get("utime", 0),
+        )
+
 
 @dataclass
 class PlayHistory:
     uid: int
     category_id: str = ""       # NFO 存储用；恢复时用 hash_fingerprint 实时查
     hash_fingerprint: str = ""  # 普通文件来自 DB，strm 客户端自算
+    file_name: str = ""         # 备份时的视频文件名，用于恢复时文件名精确匹配
     progress: float = 0.0
     current_play_time: int = 0
     last_access_time: int = 0
