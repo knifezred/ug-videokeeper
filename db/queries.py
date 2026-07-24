@@ -167,7 +167,8 @@ def fetch_collection(conn, category_id: str) -> Optional[dict]:
 def fetch_episodes(conn, category_id: str) -> list[dict]:
     """查询某电视剧的所有剧集"""
     sql = """
-        SELECT ug_television_episode_id, category_id, season, episode,
+        SELECT ug_television_episode_id, category_id, old_category_id,
+               season, episode,
                name, overview, cover_path, language, episode_flag,
                ctime, utime, media_lib_set_id
         FROM ug_television_episode

@@ -61,11 +61,12 @@ def _update_episodes(conn, category_id: str, episodes: list[dict]):
             else:
                 cur.execute(
                     """INSERT INTO ug_television_episode
-                       (category_id, season, episode, name, overview,
-                        cover_path, language, episode_flag,
+                       (category_id, old_category_id, season, episode,
+                        name, overview, cover_path, language, episode_flag,
                         ctime, utime, media_lib_set_id)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (category_id, season, episode,
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (category_id, ep.get("old_category_id", ""),
+                     season, episode,
                      ep.get("name", ""), ep.get("overview", ""),
                      ep.get("cover_path", ""), ep.get("language", ""),
                      ep.get("episode_flag", ""), ep.get("ctime", 0),
